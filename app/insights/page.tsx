@@ -3,7 +3,7 @@
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Navbar2 } from "@/components/navbar"
+import { Navbar } from "@/components/navbar"
 import { InsightsChart } from "@/components/insights-chart"
 import { SkillsChart } from "@/components/skills-chart"
 import { ApplicationTrendChart } from "@/components/application-trend-chart"
@@ -72,7 +72,7 @@ export default function InsightsPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <Navbar2 />
+      <Navbar />
 
       <div className="pt-24 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto">

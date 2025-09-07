@@ -4,7 +4,7 @@ import Link from "next/link";
 import Orb from "@/components/bg";
 import Footer from "@/components/footer";
 import TeamSection from "@/components/team";
-import { Navbar2 } from "@/components/navbar";
+import { Navbar } from "@/components/navbar";
 import Features from "@/components/home/features";
 import { Button } from "@/components/ui/button";
 import { MessageCircle, Sparkles } from "lucide-react";
@@ -13,7 +13,7 @@ import ContentSection from "@/components/home/content";
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-background">
-      <Navbar2 />
+      <Navbar />
       {/* Hero Section */}
       <section className="relative py-56 px-4 sm:px-6 lg:px-8 overflow-hidden bg-transparent">
         <div className="absolute inset-5 w-full h-full z-0 pointer-events-none">

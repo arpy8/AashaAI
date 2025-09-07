@@ -4,7 +4,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Navbar2 } from "@/components/navbar"
+import { Navbar } from "@/components/navbar"
 import { ProfileSection } from "@/components/profile-section"
 import { Mail, Phone, MapPin, Calendar, Edit3, Upload, GraduationCap, Briefcase, Code } from "lucide-react"
 import Image from "next/image"
@@ -97,7 +97,7 @@ export default function ProfilePage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <Navbar2 />
+      <Navbar />
 
       <div className="pt-24 px-4 sm:px-6 lg:px-8">
         <div className="max-w-4xl mx-auto">

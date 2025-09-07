@@ -7,9 +7,8 @@ import { Suspense } from "react"
 import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "HireLink | AI-Powered Job Applications",
-  description: "Swipe. Match. Apply. Simplifying job applications for undergraduates.",
-  generator: "v0.app",
+  title: "AashaAI | AI-Powered Mental Health Companion",
+  description: "Your AI-powered mental health companion, providing support, resources and a listening ear whenever you need it.",
 }
 
 export default function RootLayout({

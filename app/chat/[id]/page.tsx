@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
-import { Navbar2 } from "@/components/navbar";
+import { Navbar } from "@/components/navbar";
 import { ChatFeed, Message } from "react-chat-ui";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -85,7 +85,7 @@ export default function ChatPage() {
   // Sidebar for previous chats
   return (
     <div className="min-h-screen bg-background flex flex-col">
-      <Navbar2 />
+      <Navbar />
       <div className="pt-20 px-4 sm:px-6 lg:px-8 flex">
         {/* Sidebar */}
         <div className="w-64 bg-card border-r rounded-xl mr-8 flex-shrink-0 h-[600px] overflow-y-auto">
