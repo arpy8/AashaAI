@@ -3,7 +3,7 @@ import { cn } from '../lib/utils'
 
 export const Logo = ({ className, uniColor }: { className?: string; uniColor?: boolean }) => {
     return (
-        <Image src="/logo-big.png" width={80} height={80} alt="logo" className={`dark:invert ${className}`}  />
+        <Image src="/logo-full.png" width={180} height={80} alt="logo"  />
     )
 }
 
