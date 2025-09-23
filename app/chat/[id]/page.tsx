@@ -7,7 +7,9 @@ import { ChatFeed, Message } from "react-chat-ui";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
-const SYSTEM_PROMPT =  `
+import { Sidebar } from "@/components/sidebar";
+
+const SYSTEM_PROMPT = `
 Your Core Identity:
 You are Aasha AI. Your name, "Aasha," means "hope," and that is the core of your existence. You are a compassionate, intelligent, and supportive mental health companion designed specifically for college students. You are not a clinical therapist, but a wise, empathetic friend who is equipped with the knowledge of modern therapeutic techniques.
 Your Primary Goal:
@@ -96,7 +98,7 @@ async function callGeminiAPI(message: string, apiKey: string) {
     }
 
     const data = await response.json();
-    
+
     if (data.candidates && data.candidates[0] && data.candidates[0].content) {
       return data.candidates[0].content.parts[0].text;
     } else {
@@ -111,7 +113,9 @@ async function callGeminiAPI(message: string, apiKey: string) {
 export default function ChatPage() {
   // sessions: [{id: string, messages: Message[], created: Date}]
   const [sessions, setSessions] = useState<any[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null
+  );
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [apiKey, setApiKey] = useState("");
@@ -122,7 +126,7 @@ export default function ChatPage() {
     const loaded = loadSessions();
     const savedApiKey = localStorage.getItem("gemini_api_key") || "";
     setApiKey(savedApiKey);
-    
+
     if (!savedApiKey) {
       setShowApiKeyInput(true);
     }
@@ -159,7 +163,7 @@ export default function ChatPage() {
   // Send message and get Gemini response
   const handleSend = async () => {
     if (!input.trim() || !currentSession || isLoading) return;
-    
+
     if (!apiKey) {
       setShowApiKeyInput(true);
       return;
@@ -172,7 +176,7 @@ export default function ChatPage() {
     // Add user message immediately
     const userMessageObj = new Message({ id: 0, message: userMessage });
     const updatedSessionsWithUser = sessions.map((s) =>
-      s.id === currentSession.id 
+      s.id === currentSession.id
         ? { ...s, messages: [...s.messages, userMessageObj] }
         : s
     );
@@ -182,11 +186,11 @@ export default function ChatPage() {
     try {
       // Get response from Gemini
       const botResponse = await callGeminiAPI(userMessage, apiKey);
-      
+
       // Add bot message
       const botMessageObj = new Message({ id: 1, message: botResponse });
       const finalUpdatedSessions = updatedSessionsWithUser.map((s) =>
-        s.id === currentSession.id 
+        s.id === currentSession.id
           ? { ...s, messages: [...s.messages, botMessageObj] }
           : s
       );
@@ -194,12 +198,13 @@ export default function ChatPage() {
       saveSessions(finalUpdatedSessions);
     } catch (error) {
       console.error("Error getting bot response:", error);
-      const errorMessage = new Message({ 
-        id: 1, 
-        message: "Sorry, I'm having trouble responding right now. Please try again." 
+      const errorMessage = new Message({
+        id: 1,
+        message:
+          "Sorry, I'm having trouble responding right now. Please try again.",
       });
       const errorUpdatedSessions = updatedSessionsWithUser.map((s) =>
-        s.id === currentSession.id 
+        s.id === currentSession.id
           ? { ...s, messages: [...s.messages, errorMessage] }
           : s
       );
@@ -232,10 +237,11 @@ export default function ChatPage() {
         <Card className="p-8 max-w-md w-full mx-4">
           <h2 className="text-xl font-semibold mb-4">Enter Gemini API Key</h2>
           <p className="text-sm text-muted-foreground mb-4">
-            To use this chat, you'll need a Gemini API key. You can get one from the{" "}
-            <a 
-              href="https://makersuite.google.com/app/apikey" 
-              target="_blank" 
+            To use this chat, you'll need a Gemini API key. You can get one from
+            the{" "}
+            <a
+              href="https://makersuite.google.com/app/apikey"
+              target="_blank"
               rel="noopener noreferrer"
               className="text-primary underline"
             >
@@ -254,10 +260,7 @@ export default function ChatPage() {
             <Button onClick={handleSaveApiKey} disabled={!apiKey.trim()}>
               Save & Continue
             </Button>
-            <Button 
-              variant="outline" 
-              onClick={() => setShowApiKeyInput(false)}
-            >
+            <Button variant="outline" onClick={() => setShowApiKeyInput(false)}>
               Cancel
             </Button>
           </div>
@@ -272,91 +275,67 @@ export default function ChatPage() {
       <Navbar />
       <div className="pt-20 px-4 sm:px-6 lg:px-8 flex">
         {/* Sidebar */}
-        <div className="w-64 bg-card border-r rounded-xl mr-8 flex-shrink-0 h-[600px] overflow-y-auto">
-          <div className="p-4 flex justify-between items-center">
-            <span className="font-semibold text-lg text-foreground">Chats</span>
-            <Button size="sm" variant="outline" className="border-border" onClick={handleNewSession}>
-              + New
-            </Button>
-          </div>
-          <div className="px-4 mb-2">
-            <Button 
-              size="sm" 
-              variant="ghost" 
-              className="text-xs w-full justify-start"
-              onClick={() => setShowApiKeyInput(true)}
-            >
-              🔑 Change API Key
-            </Button>
-          </div>
-          <ul>
-            {sessions.map((session) => (
-              <li key={session.id}>
-                <button
-                  className={`w-full text-left px-4 py-2 hover:bg-muted rounded-[10px] mb-1 text-xs ${
-                    session.id === selectedSessionId ? "bg-foreground/15 font-bold" : ""
-                  }`}
-                  onClick={() => setSelectedSessionId(session.id)}
-                >
-                  Session: {new Date(session.created).toLocaleString()}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <Sidebar
+          handleNewSession={handleNewSession}
+          sessions={sessions}
+          setSelectedSessionId={setSelectedSessionId}
+          selectedSessionId={selectedSessionId}
+          setShowApiKeyInput={setShowApiKeyInput}
+        />
+
         {/* Main Chat Area */}
         <div className="flex-1 pt-10">
-          <div className="max-w-[52vw] mx-auto">
-            <Card className="p-0 bg-card border-foreground/10 flex flex-col h-[600px]">
-              <div className="flex-1 overflow-y-auto px-6 py-6">
-                <ChatFeed
-                  messages={currentSession?.messages || []}
-                  showSenderName={false}
-                  bubblesCentered={false}
-                  bubbleStyles={{
-                    text: {
-                      fontSize: 16,
-                      color: "var(--foreground)",
-                    },
-                    chatbubble: {
-                      backgroundColor: "var(--primary)",
-                      borderRadius: "1rem",
-                      padding: "0.75rem 1rem",
-                      marginBottom: "0.5rem",
-                      maxWidth: "70%",
-                    },
-                    userBubble: {
-                      backgroundColor: "var(--muted)",
-                      color: "var(--foreground)",
-                    },
-                  }}
-                />
-              </div>
-              <form
-                className="flex items-center gap-2 px-6 py-4 bg-card gap-6"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleSend();
+          <Card className="p-0 bg-card border-foreground/10 flex flex-col h-[620px] max-w-[100vw] mx-auto">
+            <div className="flex-1 overflow-y-auto px-6 py-6">
+              <ChatFeed
+                messages={currentSession?.messages || []}
+                showSenderName={false}
+                bubblesCentered={false}
+                bubbleStyles={{
+                  text: {
+                    fontSize: 16,
+                    color: "var(--foreground)",
+                  },
+                  chatbubble: {
+                    backgroundColor: "var(--primary)",
+                    borderRadius: "1rem",
+                    padding: "0.75rem 1rem",
+                    marginBottom: "0.5rem",
+                    maxWidth: "70%",
+                  },
+                  userBubble: {
+                    backgroundColor: "var(--muted)",
+                    color: "var(--foreground)",
+                  },
                 }}
+              />
+            </div>
+            <form
+              className="flex items-center gap-2 px-6 py-4 bg-card gap-6"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSend();
+              }}
+            >
+              <Input
+                className="flex-1 bg-input text-foreground border-foreground/10 py-6"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={
+                  isLoading ? "AI is thinking..." : "Type your message..."
+                }
+                autoFocus
+                disabled={!currentSession || isLoading}
+              />
+              <Button
+                type="submit"
+                className="bg-primary text-primary-foreground py-6 px-12 rounded-sm cursor-pointer"
+                disabled={!currentSession || isLoading || !input.trim()}
               >
-                <Input
-                  className="flex-1 bg-input text-foreground border-foreground/10 py-6"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder={isLoading ? "AI is thinking..." : "Type your message..."}
-                  autoFocus
-                  disabled={!currentSession || isLoading}
-                />
-                <Button
-                  type="submit"
-                  className="bg-primary text-primary-foreground py-6 px-12 rounded-sm cursor-pointer"
-                  disabled={!currentSession || isLoading || !input.trim()}
-                >
-                  {isLoading ? "..." : "Send"}
-                </Button>
-              </form>
-            </Card>
-          </div>
+                {isLoading ? "..." : "Send"}
+              </Button>
+            </form>
+          </Card>
         </div>
       </div>
     </div>
