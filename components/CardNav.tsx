@@ -202,7 +202,7 @@ const CardNav: React.FC<CardNavProps> = ({
 
           <Button variant="destructive">
             <CircleAlert />{" "}
-            <Link href="https://www.youtube.com/results?search_query=latest+oggy+and+the+cockroaches+in+hindi+episode">Panic Button</Link>
+            <Link href="/">Panic Button</Link>
           </Button>
         </div>
 
