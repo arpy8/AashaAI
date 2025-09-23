@@ -21,15 +21,72 @@ function saveSessions(sessions: any[]) {
   localStorage.setItem(LS_KEY, JSON.stringify(sessions));
 }
 
+// Gemini API function
+async function callGeminiAPI(message: string, apiKey: string) {
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: message,
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.7,
+            topK: 40,
+            topP: 0.95,
+            maxOutputTokens: 1024,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (data.candidates && data.candidates[0] && data.candidates[0].content) {
+      return data.candidates[0].content.parts[0].text;
+    } else {
+      throw new Error("Invalid response format from Gemini API");
+    }
+  } catch (error) {
+    console.error("Error calling Gemini API:", error);
+    return "Sorry, I'm having trouble connecting to the AI service. Please try again.";
+  }
+}
+
 export default function ChatPage() {
   // sessions: [{id: string, messages: Message[], created: Date}]
   const [sessions, setSessions] = useState<any[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false);
 
-  // Load sessions from localStorage on mount
+  // Load sessions and API key from localStorage on mount
   useEffect(() => {
     const loaded = loadSessions();
+    const savedApiKey = localStorage.getItem("gemini_api_key") || "";
+    setApiKey(savedApiKey);
+    
+    if (!savedApiKey) {
+      setShowApiKeyInput(true);
+    }
+
     if (loaded.length === 0) {
       // Create initial session
       const initialSession = {
@@ -51,20 +108,67 @@ export default function ChatPage() {
   // Get current session
   const currentSession = sessions.find((s) => s.id === selectedSessionId);
 
-  // Send message and update localStorage
-  const handleSend = () => {
-    if (!input.trim() || !currentSession) return;
-    const newMessages = [
-      ...currentSession.messages,
-      new Message({ id: 0, message: input }),
-      new Message({ id: 1, message: "Thanks for your message! (Bot reply)" }),
-    ];
-    const updatedSessions = sessions.map((s) =>
-      s.id === currentSession.id ? { ...s, messages: newMessages } : s
-    );
-    setSessions(updatedSessions);
-    saveSessions(updatedSessions);
+  // Save API key
+  const handleSaveApiKey = () => {
+    if (apiKey.trim()) {
+      localStorage.setItem("gemini_api_key", apiKey.trim());
+      setShowApiKeyInput(false);
+    }
+  };
+
+  // Send message and get Gemini response
+  const handleSend = async () => {
+    if (!input.trim() || !currentSession || isLoading) return;
+    
+    if (!apiKey) {
+      setShowApiKeyInput(true);
+      return;
+    }
+
+    const userMessage = input;
     setInput("");
+    setIsLoading(true);
+
+    // Add user message immediately
+    const userMessageObj = new Message({ id: 0, message: userMessage });
+    const updatedSessionsWithUser = sessions.map((s) =>
+      s.id === currentSession.id 
+        ? { ...s, messages: [...s.messages, userMessageObj] }
+        : s
+    );
+    setSessions(updatedSessionsWithUser);
+    saveSessions(updatedSessionsWithUser);
+
+    try {
+      // Get response from Gemini
+      const botResponse = await callGeminiAPI(userMessage, apiKey);
+      
+      // Add bot message
+      const botMessageObj = new Message({ id: 1, message: botResponse });
+      const finalUpdatedSessions = updatedSessionsWithUser.map((s) =>
+        s.id === currentSession.id 
+          ? { ...s, messages: [...s.messages, botMessageObj] }
+          : s
+      );
+      setSessions(finalUpdatedSessions);
+      saveSessions(finalUpdatedSessions);
+    } catch (error) {
+      console.error("Error getting bot response:", error);
+      // Add error message
+      const errorMessage = new Message({ 
+        id: 1, 
+        message: "Sorry, I'm having trouble responding right now. Please try again." 
+      });
+      const errorUpdatedSessions = updatedSessionsWithUser.map((s) =>
+        s.id === currentSession.id 
+          ? { ...s, messages: [...s.messages, errorMessage] }
+          : s
+      );
+      setSessions(errorUpdatedSessions);
+      saveSessions(errorUpdatedSessions);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Start a new chat session
@@ -82,6 +186,47 @@ export default function ChatPage() {
     saveSessions(updatedSessions);
   };
 
+  // API Key Input Modal
+  if (showApiKeyInput) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <Card className="p-8 max-w-md w-full mx-4">
+          <h2 className="text-xl font-semibold mb-4">Enter Gemini API Key</h2>
+          <p className="text-sm text-muted-foreground mb-4">
+            To use this chat, you'll need a Gemini API key. You can get one from the{" "}
+            <a 
+              href="https://makersuite.google.com/app/apikey" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-primary underline"
+            >
+              Google AI Studio
+            </a>
+            .
+          </p>
+          <Input
+            type="password"
+            placeholder="Enter your Gemini API key"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            className="mb-4"
+          />
+          <div className="flex gap-2">
+            <Button onClick={handleSaveApiKey} disabled={!apiKey.trim()}>
+              Save & Continue
+            </Button>
+            <Button 
+              variant="outline" 
+              onClick={() => setShowApiKeyInput(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   // Sidebar for previous chats
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -93,6 +238,16 @@ export default function ChatPage() {
             <span className="font-semibold text-lg text-foreground">Chats</span>
             <Button size="sm" variant="outline" className="border-border" onClick={handleNewSession}>
               + New
+            </Button>
+          </div>
+          <div className="px-4 mb-2">
+            <Button 
+              size="sm" 
+              variant="ghost" 
+              className="text-xs w-full justify-start"
+              onClick={() => setShowApiKeyInput(true)}
+            >
+              🔑 Change API Key
             </Button>
           </div>
           <ul>
@@ -149,16 +304,16 @@ export default function ChatPage() {
                   className="flex-1 bg-input text-foreground border-foreground/10 py-6"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder="Type your message..."
+                  placeholder={isLoading ? "AI is thinking..." : "Type your message..."}
                   autoFocus
-                  disabled={!currentSession}
+                  disabled={!currentSession || isLoading}
                 />
                 <Button
                   type="submit"
                   className="bg-primary text-primary-foreground py-6 px-12 rounded-sm cursor-pointer"
-                  disabled={!currentSession}
+                  disabled={!currentSession || isLoading || !input.trim()}
                 >
-                  Send
+                  {isLoading ? "..." : "Send"}
                 </Button>
               </form>
             </Card>
