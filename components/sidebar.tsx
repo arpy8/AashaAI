@@ -34,7 +34,7 @@ export const Sidebar = ({
             {sessions.map((session) => (
               <li key={session.id}>
                 <button
-                  className={`w-full text-left px-4 py-2 hover:bg-muted rounded-[5px] mb-1 text-xs ${
+                  className={`w-full text-left px-4 py-2 cursor-pointer hover:bg-muted rounded-[5px] mb-1 text-xs ${
                     session.id === selectedSessionId
                       ? "bg-foreground/15 font-bold"
                       : ""
@@ -50,8 +50,7 @@ export const Sidebar = ({
         <div className="p-4">
           <Button
             size="sm"
-            variant="ghost"
-            className="text-xs w-full justify-start"
+            className="text-xs w-full justify-start cursor-pointer bg-foreground/5 hover:bg-foreground/30 rounded-[5px]"
             onClick={() => setShowApiKeyInput(true)}
           >
             🔑 Change API Key

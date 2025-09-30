@@ -162,7 +162,7 @@ const CardNav: React.FC<CardNavProps> = ({
 
   return (
     <div
-      className={`card-nav-container absolute left-1/2 -translate-x-1/2 w-[90%] max-w-[800px] z-[99] top-[1em] md:top-[1em] ${className}`}
+      className={`absolute left-1/2 -translate-x-1/2 w-[90%] max-w-[800px] z-[99] top-[1em] md:top-[1em] ${className}`}
     >
       <nav
         ref={navRef}
@@ -171,7 +171,7 @@ const CardNav: React.FC<CardNavProps> = ({
         } block h-[60px] p-0 rounded-xl shadow-md relative overflow-hidden will-change-[height]`}
         style={{ backgroundColor: baseColor }}
       >
-        <div className="card-nav-top absolute inset-x-0 top-0 h-[60px] flex items-center justify-between p-2 pl-[1.1rem] z-[2]">
+        <div className="absolute inset-x-0 top-0 h-[60px] flex items-center justify-between p-2 pl-[1.1rem] z-[2]">
           <div
             className={`hamburger-menu ${
               isHamburgerOpen ? "open" : ""
@@ -207,7 +207,7 @@ const CardNav: React.FC<CardNavProps> = ({
         </div>
 
         <div
-          className={`card-nav-content absolute left-0 right-0 top-[60px] bottom-0 p-2 flex flex-col items-stretch gap-2 justify-start z-[1] ${
+          className={`absolute left-0 right-0 top-[60px] bottom-0 p-2 flex flex-col items-stretch gap-2 justify-start z-[1] ${
             isExpanded
               ? "visible pointer-events-auto"
               : "invisible pointer-events-none"
@@ -221,19 +221,19 @@ const CardNav: React.FC<CardNavProps> = ({
               ref={setCardRef(idx)}
               style={{ backgroundColor: item.bgColor, color: item.textColor }}
             >
-              <div className="nav-card-label font-normal tracking-[-0.5px] text-[18px] md:text-[22px]">
+              <div className="font-normal tracking-[-0.5px] text-[18px] md:text-[22px]">
                 {item.label}
               </div>
-              <div className="nav-card-links mt-auto flex flex-col gap-[2px]">
+              <div className="mt-auto flex flex-col gap-[2px]">
                 {item.links?.map((lnk, i) => (
                   <a
                     key={`${lnk.label}-${i}`}
-                    className="nav-card-link inline-flex items-center gap-[6px] no-underline cursor-pointer transition-opacity duration-300 hover:opacity-75 text-[15px] md:text-[16px]"
+                    className="inline-flex items-center gap-[6px] no-underline cursor-pointer transition-opacity duration-300 hover:opacity-75 text-[15px] md:text-[16px]"
                     href={lnk.href}
                     aria-label={lnk.ariaLabel}
                   >
                     <MoveUpRight
-                      className="nav-card-link-icon shrink-0"
+                      className="icon shrink-0"
                       aria-hidden="true"
                     />
                     {lnk.label}

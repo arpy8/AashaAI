@@ -2,7 +2,7 @@
 
 import CardNav from './CardNav'
 
-export function Navbar() {
+export function Navbar({className=""}: {className?: string}) {
   const items = [
     {
       label: "Menu",
@@ -44,6 +44,7 @@ export function Navbar() {
       buttonBgColor="#3b6de6"
       buttonTextColor="#fff"
       ease="power3.out"
+      className={className}
     />
   );
 };

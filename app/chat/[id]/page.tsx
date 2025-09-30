@@ -254,13 +254,13 @@ export default function ChatPage() {
             placeholder="Enter your Gemini API key"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            className="mb-4"
+            className="mb-4 border border-gray-900 rounded-[5px]"
           />
           <div className="flex gap-2">
-            <Button onClick={handleSaveApiKey} disabled={!apiKey.trim()}>
+            <Button onClick={handleSaveApiKey} disabled={!apiKey.trim()} className="rounded-[5px] cursor-pointer">
               Save & Continue
             </Button>
-            <Button variant="outline" onClick={() => setShowApiKeyInput(false)}>
+            <Button variant="destructive" onClick={() => setShowApiKeyInput(false)} className="rounded-[5px] cursor-pointer">
               Cancel
             </Button>
           </div>

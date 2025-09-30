@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Renderer, Program, Mesh, Triangle, Vec3 } from 'ogl';
 
 interface OrbProps {
@@ -8,7 +8,26 @@ interface OrbProps {
   forceHoverState?: boolean;
 }
 
-export default function Orb({
+export default function OrbWrapper() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setVisible(true), 50);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return (
+    <div
+      className={`absolute inset-5 w-full h-full z-0 pointer-events-none 
+        transition-opacity duration-2000 ease-in-out
+        ${visible ? "opacity-100" : "opacity-0"}`}
+    >
+      <Orb />
+    </div>
+  );
+}
+
+export function Orb({
   hue = 0,
   hoverIntensity = 0.2,
   rotateOnHover = true,

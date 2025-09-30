@@ -31,7 +31,7 @@ export default function ContentSection() {
 
                                 <div className="mt-6 space-y-3">
                                     <cite className="block font-medium">Amba Singh, Student</cite>
-                                    <Image className="h-5 w-fit" src="/vitb.png" alt="vitb Logo" height={60} width={60} />
+                                    <Image className="h-8 w-fit" src="/vitb.png" alt="vitb Logo" height={24} width={24} />
                                 </div>
                             </blockquote>
                         </div>

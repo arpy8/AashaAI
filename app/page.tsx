@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import Orb from "@/components/bg";
+import OrbWrapper from "@/components/bg";
 import Footer from "@/components/footer";
 import TeamSection from "@/components/team";
 import { Navbar } from "@/components/navbar";
@@ -13,15 +13,13 @@ import ContentSection from "@/components/home/content";
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-background">
-      <Navbar />
+      <Navbar className="fixed" />
       {/* Hero Section */}
       <section className="relative py-56 px-4 sm:px-6 lg:px-8 overflow-hidden bg-transparent">
-        <div className="absolute inset-5 w-full h-full z-0 pointer-events-none">
-          <Orb />
-        </div>
+        <OrbWrapper />
 
         <div className="max-w-4xl mx-auto text-center relative z-10">
-          <div className="mb-8 inline-flex items-center px-4 py-2 rounded-full bg-card border border-gray-800">
+          <div className="mb-8 inline-flex items-center px-4 py-2 rounded-full bg-card border border-gray-900">
             <Sparkles className="h-4 w-4 text-primary mr-2" />
             <span className="text-sm text-muted-foreground">
               AI-Powered Mental Health Support
