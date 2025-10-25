@@ -44,7 +44,7 @@ export function Navbar({className=""}: {className?: string}) {
       buttonBgColor="#3b6de6"
       buttonTextColor="#fff"
       ease="power3.out"
-      className={className}
+      className={`border border-gray-800 rounded-lg ${className}`}
     />
   );
 };

@@ -10,7 +10,7 @@
   --card-foreground: oklch(1 0 0); /* #FFFFFF */
   --popover: oklch(0.165 0 0); /* #2A2A2A */
   --popover-foreground: oklch(1 0 0);
-  --primary: oklch(0.569 0.191 264.052); /* #2563EB blue */
+  --primary: #6404b3;
   --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.102 0 0); /* #1A1A1A */
   --secondary-foreground: oklch(0.627 0 0); /* #A0A0A0 muted */
@@ -47,7 +47,7 @@
   --card-foreground: oklch(1 0 0);
   --popover: oklch(0.165 0 0); /* #2A2A2A */
   --popover-foreground: oklch(1 0 0);
-  --primary: oklch(0.569 0.191 264.052); /* #2563EB */
+  --primary: #6404b3;
   --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.102 0 0);
   --secondary-foreground: oklch(0.627 0 0); /* #A0A0A0 */
@@ -125,7 +125,33 @@
   }
 }
 
-
 html {
   scroll-behavior: smooth;
+}
+
+
+/* width */
+::-webkit-scrollbar {
+  width: 5px;
+}
+
+/* Track */
+::-webkit-scrollbar-track {
+  background: #030303;
+}
+
+/* Handle */
+::-webkit-scrollbar-thumb {
+  background: #ffffff20;
+  border-radius: 20px;
+}
+
+/* Handle on hover */
+::-webkit-scrollbar-thumb:hover {
+  background: #6404b3;
+}
+
+::selection {
+  color: var(--white);
+  background-color: var(--green);
 }
