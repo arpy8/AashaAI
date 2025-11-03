@@ -11,7 +11,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 COPY pyproject.toml uv.lock* ./
 
 RUN uv sync --frozen
-RUN python -m piper.download_voices en_US-libritts_r-medium --data-dir /tts-models
+RUN python -m piper.download_voices en_US-libritts_r-medium --data-dir /tts_models
 
 COPY . /code
 
