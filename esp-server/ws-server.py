@@ -51,7 +51,7 @@ def format_text(input_text):
         u"\u23cf"
         u"\u23e9"
         u"\u231a"
-        u"\ufe0f"  # dingbats
+        u"\ufe0f"
         u"\u3030"
     "]+", re.UNICODE)
     return re.sub(emoj, '', text)
@@ -128,7 +128,8 @@ async def process_audio(audio_data):
 async def handle_client(websocket, path):
     """Handle WebSocket client connection"""
     client_id = id(websocket)
-    print(f"Client {client_id} connected from {websocket.remote_address}")
+    remote_addr = websocket.remote_address if hasattr(websocket, 'remote_address') else "unknown"
+    print(f"Client {client_id} connected from {remote_addr}")
     
     try:
         async for message in websocket:
@@ -187,13 +188,20 @@ async def handle_client(websocket, path):
             
             except Exception as e:
                 print(f"Error processing message: {e}")
-                await websocket.send(json.dumps({
-                    "status": "error",
-                    "message": str(e)
-                }))
+                import traceback
+                traceback.print_exc()
+                try:
+                    await websocket.send(json.dumps({
+                        "status": "error",
+                        "message": str(e)
+                    }))
+                except:
+                    pass
     
     except websockets.exceptions.ConnectionClosed:
         print(f"Client {client_id} disconnected")
+    except Exception as e:
+        print(f"Connection error for client {client_id}: {e}")
     
     finally:
         print(f"Connection closed for client {client_id}")
@@ -202,8 +210,17 @@ async def handle_client(websocket, path):
 async def main():
     """Start WebSocket server"""
     print(f"Starting WebSocket server on ws://{WEBSOCKET_HOST}:{WEBSOCKET_PORT}")
+    print("Note: Hugging Face Spaces will automatically handle SSL/TLS")
     
-    async with websockets.serve(handle_client, WEBSOCKET_HOST, WEBSOCKET_PORT):
+    # Additional server configuration for better connection handling
+    async with websockets.serve(
+        handle_client, 
+        WEBSOCKET_HOST, 
+        WEBSOCKET_PORT,
+        ping_interval=20,  # Send ping every 20 seconds
+        ping_timeout=10,   # Wait 10 seconds for pong
+        max_size=10*1024*1024  # 10MB max message size
+    ):
         print("Server is running. Press Ctrl+C to stop.")
         await asyncio.Future()
 
