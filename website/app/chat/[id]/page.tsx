@@ -146,14 +146,14 @@ export default function ChatPage() {
   return (
     <div className="min-h-screen flex flex-col">
       <Navbar />
-      <div className="pt-20 px-4 sm:px-6 lg:px-8 flex">
-        <Sidebar
+      <div className="pt-2 px-4 sm:px-6 lg:px-8 flex">
+        {/* <Sidebar
           handleNewSession={handleNewSession}
           sessions={sessions}
           setSelectedSessionId={setSelectedSessionId}
           selectedSessionId={selectedSessionId}
-        />
-        <div className="flex-1 pt-10">
+        /> */}
+        <div className="flex-1 pt-12">
           <Card className="p-0 bg-card border-foreground/10 flex flex-col h-[620px] max-w-[100vw] mx-auto border border-gray-800 rounded-lg ">
             <div className="flex-1 overflow-y-auto px-6 py-6">
               <ChatFeed
