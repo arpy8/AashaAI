@@ -15,14 +15,6 @@ export function Navbar({className=""}: {className?: string}) {
       ]
     },
     {
-      label: "Profile", 
-      bgColor: "#170D27",
-      textColor: "#fff",
-      links: [
-        { label: "Settings", ariaLabel: "Settings", href: "/profile" },
-      ]
-    },
-    {
       label: "About Us",
       bgColor: "#271E37", 
       textColor: "#fff",
@@ -30,6 +22,14 @@ export function Navbar({className=""}: {className?: string}) {
         { label: "Features", ariaLabel: "Features", href: "/#features" },
         { label: "Email", ariaLabel: "Email us", href: "mailto:arpitsengar99@gmail.com" },
         { label: "LinkedIn", ariaLabel: "LinkedIn", href: "https://linkedin.com/in/arpitsengar" }
+      ]
+    },
+    {
+      label: "Profile", 
+      bgColor: "#170D27",
+      textColor: "#fff",
+      links: [
+        { label: "Settings", ariaLabel: "Settings", href: "/profile" },
       ]
     }
   ];

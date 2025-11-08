@@ -54,11 +54,11 @@ export default function Features() {
                                 />
                             </CardDecorator>
 
-                            <h3 className="mt-6 font-medium">Resource Navigation</h3>
+                            <h3 className="mt-6 font-medium">Expert Backed Development</h3>
                         </CardHeader>
 
                         <CardContent>
-                            <p className="mt-3 text-sm">Guides students to relevant articles, exercises, and professional services—connecting them with the right help at the right time.</p>
+                            <p className="mt-3 text-sm">Developed based on insights and guidance from psychology students and professionals.</p>
                         </CardContent>
                     </Card>
                 </div>

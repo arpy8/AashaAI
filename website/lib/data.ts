@@ -37,3 +37,36 @@ romanised version of any language in which the person talks to you, talk back to
 mix
 "english + romanised version of user input language"
 `;
+
+
+export const MESSAGE_FROM_KESHAV = `Dear Arpit,
+
+I hope this message finds you well. I am sharing a few professional suggestions from a psychology standpoint that may assist in shaping the system’s conversational design and ethical framework for your project titled: Aasha AI.
+
+1. Empathetic Communication:
+The chatbot should employ supportive and validating language. Rather than giving prescriptive advice, it should focus on reflective statements such as “It sounds like you’ve been feeling overwhelmed” or “That must have been difficult for you.” This approach fosters trust and emotional safety.
+
+2. Emotional Awareness and Responsiveness:
+Integrating sentiment analysis to detect emotional tones (e.g., sadness, stress, frustration) can enable the chatbot to tailor responses appropriately. Acknowledging emotions is essential to making the interaction feel genuine and human-centered.
+
+3. Ethical and Safety Considerations:
+The chatbot must include clear disclaimers emphasizing that it is not a substitute for professional psychological help. In cases where users express severe distress or suicidal ideation, it should immediately share crisis helpline details or guide them to seek professional assistance.
+
+4. Contextual Relevance:
+Since the target group comprises college students, the chatbot can include specialized modules addressing common challenges such as academic pressure, social anxiety, burnout, and career-related stress. Incorporating short relaxation or grounding exercises could further enhance its practical value.
+
+5. Privacy and Confidentiality:
+Given the sensitivity of mental health conversations, data collection should be minimized. User anonymity should be maintained wherever possible to encourage open and honest communication.
+
+6. Positive Reinforcement and Encouragement:
+Using affirming messages like “I’m glad you reached out” or “It’s commendable that you’re taking care of your mental health” can create a supportive environment that motivates continued engagement.
+
+
+By aligning these psychological principles with thoughtful technical implementation, your chatbot can serve as an accessible and empathetic tool that encourages help-seeking behavior among students.
+
+Please feel free to reach out if you would like me to elaborate on any particular aspect or assist with the design of the conversational framework.
+
+Warm regards,
+Keshav Sharma
+B.Sc. Clinical Psychology Student
+Amity University Noida`

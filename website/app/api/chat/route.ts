@@ -1,10 +1,12 @@
+import createDOMPurify from "dompurify";
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const gemini_api_key = process.env.GEMINI_API_KEY;
+const removeMd = require('remove-markdown');
 
 if (!gemini_api_key) {
-  throw new Error("API_KEY is not defined in environment variables");
+  throw new Error("GEMINI_API_KEY is not defined in environment variables");
 }
 
 const googleAI = new GoogleGenerativeAI(gemini_api_key);
@@ -20,13 +22,35 @@ const geminiModel = googleAI.getGenerativeModel({
   ...geminiConfig,
 });
 
+// const window = new JSDOM("").window;
+// const DOMPurify = createDOMPurify(window);
+
+// export function removeMd(markdown: string): string {
+//   if (!markdown) return "";
+
+//   const rawHtml: any = marked(markdown, {
+//     breaks: true,
+//     gfm: true,
+//   });
+
+//   const cleanHtml = DOMPurify.sanitize(rawHtml, {
+//     ALLOWED_TAGS: [
+//       "p", "b", "i", "em", "strong", "a", "ul", "ol", "li",
+//       "code", "pre", "blockquote", "h1", "h2", "h3", "h4",
+//       "h5", "h6", "table", "thead", "tbody", "tr", "th", "td",
+//       "br", "hr", "span"
+//     ],
+//     ALLOWED_ATTR: ["href", "title", "alt", "src", "class"],
+//   });
+
+//   return cleanHtml;
+// }
+
 export async function POST(req: NextRequest) {
   try {
-    // Parse the request body
     const body = await req.json();
     const { message, history } = body;
 
-    // Validate input
     if (!message || typeof message !== "string") {
       return NextResponse.json(
         { error: "Message is required and must be a string" },
@@ -34,7 +58,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // If history is provided, use chat mode for context
     if (history && Array.isArray(history)) {
       const chat = geminiModel.startChat({
         history: history.map((msg) => ({
@@ -44,8 +67,7 @@ export async function POST(req: NextRequest) {
       });
 
       const result = await chat.sendMessage(message);
-      const response = result.response;
-      const text = response.text();
+      const text = removeMd(result.response.text());
 
       return NextResponse.json({
         success: true,
@@ -54,10 +76,8 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Single message without history
     const result = await geminiModel.generateContent(message);
-    const response = result.response;
-    const text = response.text();
+    const text = removeMd(result.response.text());
 
     return NextResponse.json({
       success: true,

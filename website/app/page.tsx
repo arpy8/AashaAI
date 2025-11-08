@@ -1,5 +1,6 @@
 "use client";
 
+import Lenis from "lenis";
 import Link from "next/link";
 import OrbWrapper from "@/components/bg";
 import Footer from "@/components/footer";
@@ -9,8 +10,18 @@ import Features from "@/components/home/features";
 import { Button } from "@/components/ui/button";
 import { MessageCircle, Sparkles } from "lucide-react";
 import ContentSection from "@/components/home/content";
+import { useEffect } from "react";
 
 export default function LandingPage() {
+  useEffect (()=> {
+    const lenis = new Lenis();
+    function raf(time: any) {
+      lenis.raf(time);
+      requestAnimationFrame(raf);
+    }
+    requestAnimationFrame(raf);
+  }, [])
+  
   return (
     <div className="min-h-screen bg-background">
       <Navbar className="fixed" />
@@ -48,13 +59,15 @@ export default function LandingPage() {
                 <MessageCircle className="h-5 w-5" />
               </Button>
             </Link>
-            <Button
-              size="lg"
-              variant="secondary"
-              className="text-lg px-8 py-6 hover:bg-card bg-transparent text-foreground/60 hover:text-foreground cursor-pointer"
-            >
-              Learn More
-            </Button>
+            <Link href="#content">
+              <Button
+                size="lg"
+                variant="secondary"
+                className="text-lg px-8 py-6 hover:bg-card bg-transparent text-foreground/60 hover:text-foreground cursor-pointer"
+              >
+                Learn More
+              </Button>
+            </Link>
           </div>
         </div>
       </section>
