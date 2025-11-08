@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - "server/**"
+      - "website/server/**"
 
 jobs:
   deploy:
@@ -21,7 +21,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote add hf https://user:$HF_TOKEN@huggingface.co/spaces/arpy8/aasha-ai-backend-server
+          git remote add hf https://user:$HF_TOKEN@huggingface.co/spaces/arpy8/aasha-ai-backend-website/server
 
-          # Push only server folder to HF main branch
-          git push hf `git subtree split --prefix server main`:main --force
+          # Push only website/server folder to HF main branch
+          git push hf `git subtree split --prefix website/server main`:main --force
