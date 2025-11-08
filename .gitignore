@@ -46,3 +46,6 @@ next-env.d.ts
 *test*
 
 /tts_models/
+
+secrets.h
+.todo
