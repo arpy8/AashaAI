@@ -1,8 +1,8 @@
 #include <WiFi.h>
-#include <WebSocketsClient.h>
-#include <ArduinoJson.h>
 #include <driver/i2s.h>
 #include <driver/dac.h>
+#include <ArduinoJson.h>
+#include <WebSocketsClient.h>
 #include "secrets.h"
 
 #define I2S_WS 15
@@ -11,12 +11,12 @@
 #define I2S_PORT I2S_NUM_0
 
 #define RECORD_BUTTON 26
-#define LED_PIN 2
+#define LED_BUILTIN 2
 
 #define DAC_CHANNEL DAC_CHANNEL_1
 
 #define SAMPLE_RATE 8000
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4096
 #define RECORD_TIME 3
 
 WebSocketsClient webSocket;
@@ -46,33 +46,71 @@ void IRAM_ATTR onTimer() {
 }
 
 void setupI2SMicrophone() {
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-    .sample_rate = SAMPLE_RATE,
+  Serial.print("Microphone...");
+
+  const i2s_config_t i2s_config = {
+    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = 16000,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = I2S_COMM_FORMAT_I2S,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+    .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S),
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 8,
-    .dma_buf_len = 64,
+    .dma_buf_len = 512,
     .use_apll = false,
     .tx_desc_auto_clear = false,
     .fixed_mclk = 0
   };
 
-  i2s_pin_config_t pin_config = {
+  esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to install I2S driver: %d\n", err);
+    return;
+  }
+
+  const i2s_pin_config_t pin_config = {
     .bck_io_num = I2S_SCK,
     .ws_io_num = I2S_WS,
     .data_out_num = I2S_PIN_NO_CHANGE,
     .data_in_num = I2S_SD
   };
 
-  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_PORT, &pin_config);
-  i2s_set_clk(I2S_PORT, SAMPLE_RATE, I2S_BITS_PER_SAMPLE_32BIT, I2S_CHANNEL_MONO);
+  err = i2s_set_pin(I2S_PORT, &pin_config);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to set I2S pins: %d\n", err);
+    return;
+  }
+
+  i2s_zero_dma_buffer(I2S_PORT);
+  // Serial.println("I2S initialized successfully (RIGHT channel)");
+  Serial.println("✓");
+}
+
+void send_audio_chunk() {
+  const int samples = 1024;
+  int32_t buffer32[samples];
+  size_t bytes_read;
+
+  esp_err_t result = i2s_read(I2S_PORT, buffer32, samples * sizeof(int32_t),
+                              &bytes_read, portMAX_DELAY);
+
+  if (result != ESP_OK) {
+    Serial.printf("I2S read error: %d\n", result);
+    return;
+  }
+
+  // Convert 32-bit to 16-bit PCM with bit shift of 16
+  int16_t pcm16[samples];
+  for (int i = 0; i < samples; i++) {
+    pcm16[i] = (int16_t)(buffer32[i] >> 16);
+  }
+
+  webSocket.sendBIN((uint8_t*)pcm16, sizeof(pcm16));
 }
 
 void setupDACOutput() {
+  Serial.print("Speaker...");
+
   dac_output_enable(DAC_CHANNEL);
   dac_output_voltage(DAC_CHANNEL, 128);
 
@@ -80,6 +118,8 @@ void setupDACOutput() {
   timerAttachInterrupt(timer, &onTimer, true);
   timerAlarmWrite(timer, 1000000 / SAMPLE_RATE, true);
   timerAlarmEnable(timer);
+
+  Serial.println("✓");
 }
 
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -104,11 +144,11 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
           const char* message = doc["message"];
 
           Serial.print("[WS] Status: ");
-          Serial.println(status);
 
           if (strcmp(status, "processing") == 0) {
             Serial.println(message);
           } else if (strcmp(status, "success") == 0) {
+            Serial.println(status);
             Serial.print("Response: ");
             Serial.println(doc["text"].as<const char*>());
 
@@ -155,7 +195,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
   pinMode(RECORD_BUTTON, INPUT_PULLDOWN);
 
   Serial.println("\n\n╔═══════════════════════════════════╗");
@@ -170,17 +210,13 @@ void setup() {
   }
   Serial.println("✓");
 
-  Serial.print("Microphone...");
   setupI2SMicrophone();
-  Serial.println("✓");
 
-  Serial.print("Speaker...");
   setupDACOutput();
-  Serial.println("✓");
 
-  Serial.print("IP address: ");
+  Serial.print("Wifi addr: ");
   Serial.println(WiFi.localIP());
-  Serial.print("Server ws://");
+  Serial.print("Server addr: ");
   Serial.print(ws_host);
   Serial.print(":");
   Serial.println(ws_port);
@@ -190,6 +226,10 @@ void setup() {
   webSocket.setReconnectInterval(5000);
 
   Serial.println("\nSetup complete!");
+
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(1000);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 
 void loop() {
@@ -197,11 +237,11 @@ void loop() {
   static bool lastButtonState = LOW;
   bool button = digitalRead(RECORD_BUTTON);
   if (button == HIGH && lastButtonState == LOW) {
-    digitalWrite(LED_PIN, HIGH);
+    digitalWrite(LED_BUILTIN, HIGH);
     Serial.println("Recording started...");
     isRecording = true;
   } else if (button == LOW && lastButtonState == HIGH) {
-    digitalWrite(LED_PIN, LOW);
+    digitalWrite(LED_BUILTIN, LOW);
     Serial.println("Recording stopped.");
     isRecording = false;
     webSocket.sendTXT("{\"command\":\"stop\"}");

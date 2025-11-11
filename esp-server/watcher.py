@@ -3,9 +3,8 @@ import time
 import os
 import signal
 
-# Command to run your server (change this)
 COMMAND = ["uv", "run", "main.py"]
-RESTART_DELAY = 5  # seconds before restarting after a crash
+RESTART_DELAY = 5
 
 def run_server():
     print("🚀 Starting server...")
