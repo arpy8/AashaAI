@@ -22,6 +22,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           git remote add hf https://user:$HF_TOKEN@huggingface.co/spaces/arpy8/aasha-ai-esp-server
+          git config lfs.allowincompletepush true
 
           # Push only server folder to HF main branch
           git push hf `git subtree split --prefix esp-server main`:main --force
