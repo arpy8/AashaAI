@@ -13,7 +13,7 @@
 #define LED_BUILTIN 2
 
 #define DAC_CHANNEL DAC_CHANNEL_1
-
+  
 #define SAMPLE_RATE 16000
 #define BUFFER_SIZE 4096
 
@@ -112,21 +112,23 @@ void send_audio_chunk() {
   webSocket.sendBIN((uint8_t*)pcm16, sizeof(pcm16));
 }
 
-void playTestTone(int durationMs) {
+void playTestTone(int durationMs, int times) {
   Serial.println("[ESP] Playing 1kHz test tone...");
   int samples = (8000 * durationMs) / 1000;
 
-  for (int i = 0; i < samples; i++) {
-    float t = (float)i / 8000.0;
-    float sine = sin(2.0 * PI * 1000.0 * t);
-    uint8_t value = (uint8_t)((sine * 100) + 128);
+  for (int i = 0; i < times; i++) {
+    for (int i = 0; i < samples; i++) {
+      float t = (float)i / 8000.0;
+      float sine = sin(2.0 * PI * 1000.0 * t);
+      uint8_t value = (uint8_t)((sine * 100) + 128);
 
-    dac_output_voltage(DAC_CHANNEL, value);
-    delayMicroseconds(62.5);
+      dac_output_voltage(DAC_CHANNEL, value);
+      delayMicroseconds(62.5);
+    }
+    delay(50);
   }
 
   dac_output_voltage(DAC_CHANNEL, 128);
-  Serial.println("Test tone complete");
 }
 
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -167,9 +169,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
           Serial.print(".");
           lastDot = millis();
         }
-        Serial.print(".");
       }
-      Serial.println(".");
       break;
 
     case WStype_ERROR:
@@ -206,9 +206,7 @@ void setup() {
   // delay(3000);
   // digitalWrite(LED_BUILTIN, LOW);
 
-  playTestTone(250);
-  delay(50);
-  playTestTone(250);
+  playTestTone(250, 2);
 
   Serial.println("[ESP] Setup complete! Press button to talk.");
 }

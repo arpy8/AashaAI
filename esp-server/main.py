@@ -9,16 +9,17 @@ import numpy as np
 import soundfile as sf
 from google import genai
 from piper import PiperVoice
+from datetime import datetime
 from markdown import markdown
 from bs4 import BeautifulSoup
 from google.genai import types
-from collections import defaultdict
+from collections import defaultdict, deque
 from faster_whisper import WhisperModel
 
 # Configuration
-STT_MODEL_SIZE = "tiny"
+STT_MODEL_SIZE = "base"
 TTS_MODEL = "tts_models/en_US-libritts_r-medium.onnx"
-LLM_MODEL = "gemini-2.5-flash"
+LLM_MODEL = "gemini-2.5-flash-lite"
 WEBSOCKET_HOST = "0.0.0.0"
 WEBSOCKET_PORT = 7860
 CHUNK_SIZE = 4096
@@ -26,8 +27,9 @@ SAMPLE_RATE = 16000
 
 CHANNELS = 1
 SAMPLE_WIDTH = 2
+MAX_HISTORY = 10
 
-PROMPT = "You are Aashu. Aashu acts bossy." 
+PROMPT = "You are a Alexa's younger sister, a voice based assistant. You are a helpful assistant. You were built by Arpit Sengar." 
 
 # Initialize models
 print("Loading models...")
@@ -38,6 +40,7 @@ print("Models loaded successfully!")
 
 clients = set()
 audio_buffers = defaultdict(io.BytesIO)
+conversation_histories = defaultdict(lambda: deque(maxlen=MAX_HISTORY))
 
 def sanitize_text(input_text):
     """Remove markdown and emojis from text"""
@@ -73,17 +76,31 @@ def convert_to_text(file_path: str) -> tuple:
     return speech, info.language, info.language_probability
 
 
-def generate_response(query):
-    """Generate LLM response"""
+def generate_response(query, client_id):
+    """Generate LLM response with conversation history"""
     try:
+        history = conversation_histories[client_id]
+        contents = []
+
+        for user_msg, assistant_msg in history:
+            contents.append(types.Content(role="user", parts=[types.Part(text=user_msg)]))
+            contents.append(types.Content(role="model", parts=[types.Part(text=assistant_msg)]))
+        
+        contents.append(types.Content(role="user", parts=[types.Part(text=query)]))
+        
         response = llm_client.models.generate_content(
             model=LLM_MODEL, 
-            contents=query,
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=PROMPT
             ),
         )
-        return response.text
+        
+        response_text = sanitize_text(response.text)
+        
+        history.append((query, response_text))
+        
+        return response_text
     except Exception as e:
         print(f"Unexpected error during LLM generation: {e}")
         return "I'm so sorry, but I'm kinda busy right now."
@@ -100,60 +117,66 @@ async def send_to_clients(message):
         except:
             clients.remove(ws)
 
+async def stream_audio(websocket, file_path):
+    message, samplerate = sf.read(file_path, dtype='float32')
+    print(f"Loaded: {file_path} ({samplerate} Hz, {len(message)} samples)")
+    
+    if samplerate != SAMPLE_RATE:
+        x_old = np.linspace(0, len(message), len(message))
+        x_new = np.linspace(0, len(message), int(len(message) * SAMPLE_RATE / samplerate))
+        message = np.interp(x_new, x_old, message)
 
-async def process_and_stream_audio(websocket, input_filename):
+        print(f"Resampled to {SAMPLE_RATE} Hz")
+
+    if len(message.shape) > 1:
+        message = np.mean(message, axis=1)
+
+    message = (np.clip(message, -1, 1) * 127 + 128).astype(np.uint8)
+
+    for i in range(0, len(message), CHUNK_SIZE):
+        chunk = message[i:i+CHUNK_SIZE].tobytes()
+        await send_to_clients(chunk)
+        await asyncio.sleep(CHUNK_SIZE / SAMPLE_RATE)
+    
+    await websocket.send("Done playing dawg")
+
+async def process_and_stream_audio(websocket, input_filename, client_id):
     """Process audio message through STT -> LLM -> TTS pipeline"""
     try:
         
         print("Converting speech to text")
         await websocket.send("Converting to speech to text")
         speech_text, lang, prob = convert_to_text(input_filename)
-        await websocket.send(f"Transcription: {speech_text}")
         print(f"Transcription: {speech_text}")
-
         if not speech_text.strip():
             return None, "No speech detected"
         
-        print("Generating LLM response")
-        await websocket.send("Generating LLM response")
-
-        llm_response = sanitize_text(
-                        generate_response(speech_text)
-                    )
-        print(f"Response: {llm_response}")
+        if "what is the time" in speech_text.lower() or "what's the time" in speech_text.lower():
+            bot_speech_text = f"It's {datetime.now().strftime('%I:%M %p')} right now."
+            print(f"Time query detected. Responding with: {speech_text}")
+        elif "what is the date" in speech_text.lower() or "what's the date" in speech_text.lower():
+            bot_speech_text = f"It's {datetime.now().strftime('%B %d, %Y')} today."
+            print(f"Date query detected. Responding with: {speech_text}")
+        elif "clear conversation" in speech_text.lower() or "clear history" in speech_text.lower():
+            conversation_histories[client_id].clear()
+            bot_speech_text = "Conversation history cleared."
+            print(f"Clear history command detected. Responding with: {speech_text}")
+        else:
+            print("Generating LLM response")
+            await websocket.send("Generating LLM response")
+            bot_speech_text = generate_response(speech_text, client_id)
+            print(f"Response: {bot_speech_text}")
         
         print("Converting to speech")
         await websocket.send("Converting to speech")
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_output:
             temp_output_path = temp_output.name
-        convert_to_speech(llm_response, temp_output_path)
+        convert_to_speech(bot_speech_text, temp_output_path)
         
-        print("Playing audio")
-        await websocket.send("Playing audio")
-
-        message, samplerate = sf.read(temp_output_path, dtype='float32')
-        print(f"Loaded: {temp_output_path} ({samplerate} Hz, {len(message)} samples)")
-        
-        if samplerate != SAMPLE_RATE:
-            x_old = np.linspace(0, len(message), len(message))
-            x_new = np.linspace(0, len(message), int(len(message) * SAMPLE_RATE / samplerate))
-            message = np.interp(x_new, x_old, message)
-
-            print(f"Resampled to {SAMPLE_RATE} Hz")
-
-        if len(message.shape) > 1:
-            message = np.mean(message, axis=1)
-
-        message = (np.clip(message, -1, 1) * 127 + 128).astype(np.uint8)
-
-        for i in range(0, len(message), CHUNK_SIZE):
-            chunk = message[i:i+CHUNK_SIZE].tobytes()
-            await send_to_clients(chunk)
-            await asyncio.sleep(CHUNK_SIZE / SAMPLE_RATE)
-
-        
-        await websocket.send("Done playing dawg")
+        print("Streaming audio")
+        await websocket.send("Streaming audio")
+        await stream_audio(websocket, temp_output_path)
 
     finally:
         if 'temp_output_path' in locals() and os.path.exists(temp_output_path):
@@ -182,10 +205,14 @@ async def handle_client(websocket):
                 elif isinstance(message, str):
                     if message == "ping":
                         await websocket.send("pong")
+                        await stream_audio(websocket, "./audios/ping.wav")
                     elif message == "pause":
                         print(f"Pausing recording for client {client_id}...")
                         await websocket.send("Recording paused")
-
+                    elif message == "clear_history":
+                        print(f"Clearing conversation history for client {client_id}...")
+                        conversation_histories[client_id].clear()
+                        await websocket.send("Conversation history cleared")
                     elif message == "stop":
                         print(f"Saving recording for client {client_id}...")
                         
@@ -203,10 +230,9 @@ async def handle_client(websocket):
                         del audio_buffers[client_id]
 
                         await websocket.send("Processing your audio")
-                        await process_and_stream_audio(websocket, temp_input_path)
+                        await process_and_stream_audio(websocket, temp_input_path, client_id)
                 else:
                     await websocket.send("Unknown message type")
-
 
             except Exception as e:
                 print(f"Error processing message: {e}")
@@ -224,6 +250,8 @@ async def handle_client(websocket):
     
     finally:
         clients.discard(websocket)
+        if client_id in conversation_histories:
+            del conversation_histories[client_id]
         print(f"Connection closed for client {client_id}")
 
 
