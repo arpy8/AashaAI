@@ -175,7 +175,7 @@ See [LICENSE](./LICENSE) for details.
 
 ---
 
-## 💬 Acknowledgements
+## Acknowledgements
 
 * [Weslei Prudencio for Project Inspiration](https://github.com/wprudencio)
 * [Whisper by OpenAI](https://github.com/openai/whisper)

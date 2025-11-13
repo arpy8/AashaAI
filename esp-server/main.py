@@ -154,6 +154,9 @@ async def process_and_stream_audio(websocket, input_filename, client_id):
         if "what is the time" in speech_text.lower() or "what's the time" in speech_text.lower():
             bot_speech_text = f"It's {datetime.now().strftime('%I:%M %p')} right now."
             print(f"Time query detected. Responding with: {speech_text}")
+        # elif "how is the weather" in speech_text.lower() or "how's the weather" in speech_text.lower():
+        #     bot_speech_text = f"It's {datetime.now().strftime('%I:%M %p')} right now."
+        #     print(f"Weather query detected. Responding with: {speech_text}")
         elif "what is the date" in speech_text.lower() or "what's the date" in speech_text.lower():
             bot_speech_text = f"It's {datetime.now().strftime('%B %d, %Y')} today."
             print(f"Date query detected. Responding with: {speech_text}")

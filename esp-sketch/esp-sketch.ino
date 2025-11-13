@@ -56,7 +56,7 @@ void setupI2SMicrophone() {
 
   esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
   if (err != ESP_OK) {
-    Serial.printf("Failed to install I2S driver: %d\n", err);
+    Serial.printf("[ESP] Failed to install I2S driver: %d\n", err);
     return;
   }
 
@@ -69,7 +69,7 @@ void setupI2SMicrophone() {
 
   err = i2s_set_pin(I2S_PORT, &pin_config);
   if (err != ESP_OK) {
-    Serial.printf("Failed to set I2S pins: %d\n", err);
+    Serial.printf("[ESP] Failed to set I2S pins: %d\n", err);
     return;
   }
   i2s_zero_dma_buffer(I2S_PORT);
@@ -100,7 +100,7 @@ void send_audio_chunk() {
                               &bytes_read, portMAX_DELAY);
 
   if (result != ESP_OK) {
-    Serial.printf("I2S read error: %d\n", result);
+    Serial.printf("[ESP] I2S read error: %d\n", result);
     return;
   }
 
@@ -184,7 +184,7 @@ void setup() {
   pinMode(RECORD_BUTTON, INPUT_PULLDOWN);
 
   Serial.println("\n\n╔═══════════════════════════════════╗");
-  Serial.println("║     Aasha AI v2.0 - Streaming     ║");
+  Serial.println("║           Aasha AI v1.0           ║");
   Serial.println("╚═══════════════════════════════════╝\n");
 
   setupWifi();
@@ -202,9 +202,13 @@ void setup() {
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
 
-  // digitalWrite(LED_BUILTIN, HIGH);
-  // delay(3000);
-  // digitalWrite(LED_BUILTIN, LOW);
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(250);
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(250);
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(250);
+  digitalWrite(LED_BUILTIN, LOW);
 
   playTestTone(250, 2);
 
