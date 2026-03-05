@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./website/public/logo-full.png" width="280" alt="AashaAI Logo"/>
+  <img src="./website/frontend/public/logo-full.png" width="280" alt="AashaAI Logo"/>
   <p><strong>An AI-powered companion for students' mental well-being.</strong></p>
 </div>
 <br>
