@@ -1,0 +1,44 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── Virtual Environments ─────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Distribution / Build ─────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+
+# ── Test & Coverage ──────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── Environment & Secrets ────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Database ─────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Editor / OS ──────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

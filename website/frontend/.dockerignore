@@ -1,0 +1,28 @@
+# ── Dependencies (re-installed inside image) ─────────────
+node_modules/
+
+# ── Build Output (re-built inside image) ─────────────────
+dist/
+dist-ssr/
+
+# ── Secrets (injected at runtime) ────────────────────────
+.env
+.env.*
+
+# ── Logs & Cache ─────────────────────────────────────────
+*.log
+logs/
+.cache/
+.vite/
+
+# ── Git & Editor ─────────────────────────────────────────
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Docs ─────────────────────────────────────────────────
+README.md
+*.md

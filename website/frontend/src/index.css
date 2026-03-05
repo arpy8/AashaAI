@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 98%;
+    /* Soft off-white for light mode */
+    --foreground: 0 0% 12%;
+    /* Deep charcoal text */
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 12%;
+
+    /* Zen Palette */
+    --primary: 153 25% 45%;
+    /* Eucalyptus Green */
+    --primary-foreground: 0 0% 98%;
+    --secondary: 210 20% 65%;
+    /* Dust Blue */
+    --secondary-foreground: 0 0% 12%;
+    --accent: 38 40% 85%;
+    /* Soft Sand */
+    --accent-foreground: 0 0% 12%;
+
+    --muted: 0 0% 94%;
+    --muted-foreground: 0 0% 40%;
+
+    --destructive: 0 65% 50%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 88%;
+    --input: 0 0% 88%;
+    --ring: 153 25% 45%;
+
+    --radius: 0.75rem;
+
+    /* Add tracking for typography */
+    --tracking: 0.025em;
+  }
+
+  .dark {
+    /* Obsidian & Charcoal Base */
+    --background: 220 5% 8%;
+    /* Very deep obsidian/charcoal */
+    --foreground: 0 0% 90%;
+    --card: 220 5% 10%;
+    --card-foreground: 0 0% 90%;
+    --popover: 220 5% 10%;
+    --popover-foreground: 0 0% 90%;
+
+    /* Zen Palette */
+    --primary: 153 30% 55%;
+    /* Lighter Eucalyptus Green for dark mode */
+    --primary-foreground: 0 0% 10%;
+    --secondary: 210 25% 70%;
+    /* Lighter Dust Blue */
+    --secondary-foreground: 0 0% 10%;
+    --accent: 38 35% 80%;
+    /* Soft Sand */
+    --accent-foreground: 0 0% 10%;
+
+    --muted: 220 5% 15%;
+    /* Lighter charcoal for muted backgrounds */
+    --muted-foreground: 0 0% 65%;
+
+    --destructive: 0 60% 50%;
+    --destructive-foreground: 0 0% 98%;
+
+    /* Muted Silver Borders */
+    --border: 0 0% 25%;
+    --input: 0 0% 25%;
+    --ring: 153 30% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', sans-serif;
+    letter-spacing: var(--tracking);
+    /* Organic noise texture overlay via pseudo element to avoid interaction issues */
+    position: relative;
+    min-height: 100vh;
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 10;
+    opacity: 0.04;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+}
+
+/* Glassmorphism utility layer */
+@layer utilities {
+  .glass-panel {
+    @apply bg-white/5 dark:bg-black/20 backdrop-blur-[20px] border border-white/10 dark:border-white/5 shadow-inner shadow-white/5 dark:shadow-white/5;
+  }
+
+  .glass-card {
+    @apply glass-panel rounded-2xl hover:bg-white/10 dark:hover:bg-black/30 transition-all duration-300;
+  }
+}

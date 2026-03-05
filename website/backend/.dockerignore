@@ -1,0 +1,43 @@
+# ── Python runtime artifacts ─────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# ── Virtual Environments ─────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Tests & Coverage ─────────────────────────────────────
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Database (use volume or managed DB in prod) ──────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Secrets (injected at runtime via env) ────────────────
+.env
+.env.*
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Git & Editor ─────────────────────────────────────────
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Docs (not needed in image) ───────────────────────────
+README.md
+*.md
