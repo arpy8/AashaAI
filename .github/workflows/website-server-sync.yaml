@@ -2,11 +2,11 @@ name: Sync Website Server to Hugging Face Space
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "website/server/**"
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - "website/server/**"
 
 jobs:
   deploy:
