@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 import os
 import smtplib
 import ssl
@@ -118,7 +118,6 @@ def contact_endpoint(request: ContactRequest, background_tasks: BackgroundTasks)
     return {"status": "queued", "message": "Your message has been received. We'll be in touch soon!"}
 
 @app.get("/api/resources", response_model=List[ResourceResponse])
-
 def get_resources(hub_type: str = None, intensity: str = None, db: Session = Depends(get_db)):
     query = db.query(SupportResource)
     if hub_type:
