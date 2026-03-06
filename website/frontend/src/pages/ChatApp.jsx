@@ -32,7 +32,7 @@ export default function ChatApp() {
                         <a href="tel:988" className="flex-1 md:flex-none">
                             <Button variant="secondary" className="w-full bg-white text-destructive hover:bg-white/90 font-bold h-11">
                                 <PhoneCall className="w-4 h-4 mr-2" />
-                                Call 988 (Lifeline)
+                                Call 14416 (Lifeline)
                             </Button>
                         </a>
                         <Button

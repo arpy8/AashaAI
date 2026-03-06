@@ -11,7 +11,6 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 COPY pyproject.toml uv.lock* ./
 
 RUN uv sync --frozen
-RUN python -m piper.download_voices en_US-libritts_r-medium --data-dir /code/tts_models
 COPY . /code
 
 ENV PYTHONPATH=/code/src:/code
@@ -20,5 +19,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 7860
 
-# CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port 7860"]
-CMD ["sh", "-c", "python3 main.py"]
+CMD ["sh", "-c", "uv run main.py"]
