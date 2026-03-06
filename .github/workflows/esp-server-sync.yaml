@@ -2,11 +2,11 @@ name: Sync ESP Server to Hugging Face Space
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "esp-server/**"
+  # push:
+    # branches:
+    #   - main
+    # paths:
+    #   - "esp-server/**"
 
 jobs:
   deploy:
