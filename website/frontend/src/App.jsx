@@ -9,6 +9,7 @@ import Breathe from '@/pages/Breathe';
 import Vent from '@/pages/Vent';
 import Dashboard from '@/pages/Dashboard';
 import HardwareCompanion from '@/pages/HardwareCompanion';
+import Contact from '@/pages/Contact';
 
 export default function App() {
   const location = useLocation();
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/vent" element={<Vent />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/hardware" element={<HardwareCompanion />} />
+          <Route path="/contact" element={<Contact />} />
         </Routes>
       </main>
       {!hideFooter && <Footer />}

@@ -12,7 +12,7 @@ const navLinks = [
 ];
 
 const socialLinks = [
-    { icon: Github, href: 'https://github.com/arpy8/aashaai', label: 'GitHub' },
+    { icon: Github, href: 'https://github.com/arpy8/AashaAI', label: 'GitHub' },
     { icon: Twitter, href: 'https://x.com/arpy8_', label: 'Twitter' },
     { icon: Linkedin, href: 'https://linkedin.com/in/arpitsengar', label: 'LinkedIn' },
 ];

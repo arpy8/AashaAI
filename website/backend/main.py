@@ -1,9 +1,14 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 import os
+import smtplib
+import ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import google.generativeai as genai
 from datetime import datetime
 import uuid
@@ -51,6 +56,12 @@ class ChatResponse(BaseModel):
     reply: str
     crisis_detected: bool
 
+class ContactRequest(BaseModel):
+    name: str
+    email: str
+    subject: str
+    message: str
+
 class ResourceResponse(BaseModel):
     id: int
     hub_type: str
@@ -58,7 +69,56 @@ class ResourceResponse(BaseModel):
     description: str
     intensity: str
 
+# ── Email helper ──────────────────────────────────────────────────────────────
+def send_email_background(data: ContactRequest):
+    """Runs in a background thread — the HTTP response is already sent by now."""
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", 587))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    receiver = os.getenv("CONTACT_RECEIVER", smtp_user)
+
+    if not all([smtp_host, smtp_user, smtp_password]):
+        print("[contact] SMTP env vars not set — email skipped.")
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[Aasha AI Contact] {data.subject}"
+    msg["From"] = smtp_user
+    msg["To"] = receiver
+    msg["Reply-To"] = data.email
+
+    body = f"""\
+New contact form submission from Aasha AI:
+
+Name:    {data.name}
+Email:   {data.email}
+Subject: {data.subject}
+
+{data.message}
+"""
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, receiver, msg.as_string())
+        print(f"[contact] Email sent to {receiver} from {data.email}")
+    except Exception as e:
+        print(f"[contact] Failed to send email: {e}")
+
+
+@app.post("/api/contact", status_code=202)
+def contact_endpoint(request: ContactRequest, background_tasks: BackgroundTasks):
+    """Accepts a contact form submission. Returns 202 immediately; email is sent in the background."""
+    background_tasks.add_task(send_email_background, request)
+    return {"status": "queued", "message": "Your message has been received. We'll be in touch soon!"}
+
 @app.get("/api/resources", response_model=List[ResourceResponse])
+
 def get_resources(hub_type: str = None, intensity: str = None, db: Session = Depends(get_db)):
     query = db.query(SupportResource)
     if hub_type:
