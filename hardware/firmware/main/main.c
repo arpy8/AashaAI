@@ -1,3 +1,13 @@
+/**
+ * @file main.c
+ * @brief AashaAI ESP32-S3 firmware — wake-word detection, VAD, streaming, and
+ *        Opus audio playback via WebSocket.
+ *
+ * Architecture:
+ *   Core 0 — WiFi, WebSocket client, WakeNet, recording, Opus decode
+ *   Core 1 — I2S playback renderer (playback_task, spawned on demand)
+ */
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,16 +32,14 @@
 #include "esp_websocket_client.h"
 
 // ─── Sample rates ─────────────────────────────────────────────────────────────
-#define SAMPLE_RATE        16000   // Mic / WakeNet sample rate
-#define SERVER_SAMPLE_RATE 24000   // Server expects 24 kHz
+#define SAMPLE_RATE        16000
+#define SERVER_SAMPLE_RATE 24000
 
 // ─── Pin configuration ────────────────────────────────────────────────────────
 #define LED_PIN   GPIO_NUM_13
 #define I2S_BCLK  GPIO_NUM_10
 #define I2S_WS    GPIO_NUM_11
 #define I2S_DIN   GPIO_NUM_12
-
-// MAX98357 Audio Amplifier
 #define SPK_DOUT  GPIO_NUM_9
 #define SPK_BCLK  GPIO_NUM_8
 #define SPK_LRC   GPIO_NUM_7
@@ -42,88 +50,61 @@
 #define SERVER_WS_URL  "ws://192.168.137.1:8000"
 
 // ─── VAD / recording parameters ───────────────────────────────────────────────
-static float SILENCE_THRESHOLD       = 300.0f;
-#define SPEECH_ENERGY_MULTIPLIER        1.3f
-#define SILENCE_DURATION_MS             1000
-#define NO_SPEECH_TIMEOUT_MS            2000
-#define CALIBRATION_SAMPLES             50
-#define SILENCE_MULTIPLIER              1.5f
-#define ENERGY_SMOOTHING_FACTOR         0.3f
-#define MAX_RECORDING_SECONDS           20
-#define GAIN_BOOSTER                    4
+static float SILENCE_THRESHOLD     = 300.0f;
+#define SPEECH_ENERGY_MULTIPLIER    1.3f
+#define SILENCE_DURATION_MS         1000
+#define NO_SPEECH_TIMEOUT_MS        2000
+#define CALIBRATION_SAMPLES         50
+#define SILENCE_MULTIPLIER          1.5f
+#define ENERGY_SMOOTHING_FACTOR     0.3f
+#define MAX_RECORDING_SECONDS       20
+#define GAIN_BOOSTER                4
 
-// ─── Streaming / Opus parameters ─────────────────────────────────────────────
-#define AUDIO_FRAME_SIZE          480                          // 20 ms @ 24 kHz
-#define STREAMING_CHUNK_BYTES     (AUDIO_FRAME_SIZE * 2)      // 16-bit samples
-#define STREAMING_BUFFER_SAMPLES  5760                         // 240 ms buffer
+// ─── Opus / streaming parameters ──────────────────────────────────────────────
+#define AUDIO_FRAME_SIZE          480
+#define STREAMING_CHUNK_BYTES     (AUDIO_FRAME_SIZE * 2)
+#define STREAMING_BUFFER_SAMPLES  5760
 #define RESAMPLE_RATIO            1.5f
 
 // ─── Playback parameters ──────────────────────────────────────────────────────
-//
-// FIX 1: Underrun guard removed from the playback loop.
-//         playback_task is only ever spawned from the RESPONSE.COMPLETE
-//         handler, which means ALL Opus audio is already decoded into the
-//         ring buffer before a single sample is played.  Underruns are
-//         structurally impossible — we simply drain the buffer.
-//
-// FIX 2: Max chunk capped at one 20 ms frame so the task yields regularly
-//         and doesn't block the RTOS scheduler for hundreds of ms at a time.
-#define MAX_PLAYBACK_CHUNK_SAMPLES  480    // 20 ms @ 24 kHz
+#define MAX_PLAYBACK_CHUNK_SAMPLES  480
 
 // ─── Core pinning ─────────────────────────────────────────────────────────────
-//
-// FIX 3 (primary fix): Pin playback to Core 1, everything else to Core 0.
-//         On the ESP32-S3 the WebSocket client creates its own FreeRTOS task
-//         on Core 0 by default.  Running the playback renderer on the same
-//         core means Opus decoding (called from the WS event handler) and I2S
-//         writes compete for the same CPU slice — the most common cause of
-//         underruns.  Separating them onto dedicated cores eliminates this
-//         contention entirely.
-#define CORE_NETWORK   0   // WiFi, WebSocket, WakeNet, app_main
-#define CORE_PLAYBACK  1   // I2S playback renderer — dedicated, uncontested
+#define CORE_NETWORK   0
+#define CORE_PLAYBACK  1
 
-// ─── Globals ─────────────────────────────────────────────────────────────────
+// ─── Globals ──────────────────────────────────────────────────────────────────
 static float              smoothed_energy = 0.0f;
 static i2s_chan_handle_t  rx_handle       = NULL;
 static i2s_chan_handle_t  tx_handle       = NULL;
 static const char        *TAG             = "WAKENET";
 
-// Streaming (mic → server)
 static uint8_t  *streaming_audio_buffer = NULL;
 static size_t    streaming_buffer_size  = 0;
 static size_t    streaming_buffer_pos   = 0;
 static bool      is_streaming_audio     = false;
 
-// Playback ring buffer
-static uint8_t  *playback_buffer          = NULL;
-static size_t    playback_buffer_capacity = 0;
-static size_t    playback_write_pos       = 0;
-static size_t    playback_read_pos        = 0;
-static bool      playback_started         = false;
-static bool      playback_complete        = false;
-static TaskHandle_t playback_task_handle  = NULL;
+static uint8_t      *playback_buffer          = NULL;
+static size_t        playback_buffer_capacity = 0;
+static size_t        playback_write_pos       = 0;
+static size_t        playback_read_pos        = 0;
+static bool          playback_started         = false;
+static bool          playback_complete        = false;
+static TaskHandle_t  playback_task_handle     = NULL;
 
-// WebSocket
-static esp_websocket_client_handle_t ws_client  = NULL;
-static SemaphoreHandle_t             ws_sem      = NULL;
+static esp_websocket_client_handle_t ws_client     = NULL;
+static SemaphoreHandle_t             ws_sem         = NULL;
 static bool                          ws_connected   = false;
 static bool                          audio_streaming = false;
 
-// Opus decoder
 static OpusDecoder *opus_decoder      = NULL;
 static int16_t     *opus_decode_buffer = NULL;
 
-// DMA-aligned stereo interleave buffer (internal RAM for I2S DMA)
 static int16_t *streaming_stereo_buffer = NULL;
-
-// Resampler scratch buffer (PSRAM)
-static int16_t *resample_buffer = NULL;
-
-// Mutex protecting the playback ring buffer (shared between WS task / Core 0
-// and the playback task / Core 1)
+static int16_t *resample_buffer         = NULL;
 static SemaphoreHandle_t playback_mutex = NULL;
 
-// ─── WAV header (for debug saves on the server side) ─────────────────────────
+// ─── WAV header ───────────────────────────────────────────────────────────────
 typedef struct {
     char     riff[4];
     uint32_t file_size;
@@ -170,6 +151,7 @@ void calibrate_silence_threshold(int16_t *buffer, int audio_chunksize,
 // Peripheral init
 // ═════════════════════════════════════════════════════════════════════════════
 
+/** @brief Configure and enable the status LED GPIO. */
 void led_init(void)
 {
     gpio_config_t io_conf = {
@@ -183,6 +165,7 @@ void led_init(void)
     gpio_set_level(LED_PIN, 0);
 }
 
+/** @brief Initialise WiFi in station mode and block until connected. */
 void wifi_init(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -209,6 +192,7 @@ void wifi_init(void)
     ESP_LOGI(TAG, "WiFi connected");
 }
 
+/** @brief Configure I2S0 as a Philips-standard mono receiver for the INMP441. */
 void i2s_mic_init(void)
 {
     i2s_chan_config_t chan_cfg =
@@ -238,6 +222,7 @@ void i2s_mic_init(void)
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle));
 }
 
+/** @brief Configure I2S1 as a stereo transmitter for the MAX98357A amplifier. */
 void i2s_speaker_init(void)
 {
     i2s_chan_config_t chan_cfg =
@@ -269,6 +254,10 @@ void i2s_speaker_init(void)
 // Audio helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief Compute RMS energy of a PCM buffer with exponential smoothing.
+ * @return Smoothed energy value.
+ */
 float calculate_audio_energy(int16_t *buffer, int sample_count)
 {
     float sum = 0.0f;
@@ -282,7 +271,10 @@ float calculate_audio_energy(int16_t *buffer, int sample_count)
     return smoothed_energy;
 }
 
-// Simple linear-interpolation resampler: 16 kHz → 24 kHz (ratio 1.5×)
+/**
+ * @brief Linear-interpolation resampler: 16 kHz → 24 kHz (ratio 1.5×).
+ * @return Number of output samples written.
+ */
 static size_t resample_16k_to_24k(int16_t *input, size_t input_samples,
                                    int16_t *output)
 {
@@ -306,6 +298,7 @@ static size_t resample_16k_to_24k(int16_t *input, size_t input_samples,
 
 // ─── Ring-buffer helpers ──────────────────────────────────────────────────────
 
+/** @brief Return the number of bytes currently held in the playback ring buffer. */
 size_t get_buffered_audio_size(void)
 {
     if (playback_write_pos >= playback_read_pos)
@@ -313,6 +306,7 @@ size_t get_buffered_audio_size(void)
     return (playback_buffer_capacity - playback_read_pos) + playback_write_pos;
 }
 
+/** @brief Reset all playback ring-buffer state. */
 void reset_playback_buffer(void)
 {
     playback_write_pos = 0;
@@ -325,6 +319,11 @@ void reset_playback_buffer(void)
 // Memory init
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief Allocate all PSRAM buffers and initialise the Opus decoder.
+ *
+ * Must be called once from app_main before any audio activity.
+ */
 void init_recording_buffer(void)
 {
     playback_mutex = xSemaphoreCreateMutex();
@@ -335,8 +334,7 @@ void init_recording_buffer(void)
 
     size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
-    // Mic streaming scratch buffer (PSRAM)
-    streaming_buffer_size  = 96000;  // 2 s @ 24 kHz, 16-bit mono
+    streaming_buffer_size  = 96000;
     streaming_audio_buffer = (uint8_t *)heap_caps_malloc(streaming_buffer_size,
                                                           MALLOC_CAP_SPIRAM);
     if (!streaming_audio_buffer) {
@@ -344,7 +342,6 @@ void init_recording_buffer(void)
         return;
     }
 
-    // Playback ring buffer — use half of free PSRAM
     playback_buffer_capacity = psram_free / 2;
     playback_buffer = (uint8_t *)heap_caps_malloc(playback_buffer_capacity,
                                                    MALLOC_CAP_SPIRAM);
@@ -353,7 +350,6 @@ void init_recording_buffer(void)
         return;
     }
 
-    // Opus decode buffer (PSRAM — large but accessed sequentially)
     opus_decode_buffer = (int16_t *)heap_caps_malloc(
         STREAMING_BUFFER_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (!opus_decode_buffer) {
@@ -361,7 +357,6 @@ void init_recording_buffer(void)
         return;
     }
 
-    // Opus decoder instance
     int opus_error;
     opus_decoder = opus_decoder_create(SERVER_SAMPLE_RATE, 1, &opus_error);
     if (opus_error != OPUS_OK) {
@@ -369,7 +364,6 @@ void init_recording_buffer(void)
         return;
     }
 
-    // Resample buffer (PSRAM)
     size_t max_resampled = (size_t)(1024 * RESAMPLE_RATIO) + 16;
     resample_buffer = (int16_t *)heap_caps_malloc(
         max_resampled * sizeof(int16_t), MALLOC_CAP_SPIRAM);
@@ -390,6 +384,7 @@ void init_recording_buffer(void)
 // Streaming control
 // ═════════════════════════════════════════════════════════════════════════════
 
+/** @brief Begin accumulating mic audio for transmission. */
 void start_streaming(void)
 {
     streaming_buffer_pos = 0;
@@ -397,6 +392,7 @@ void start_streaming(void)
     ESP_LOGI(TAG, "Audio streaming started");
 }
 
+/** @brief Stop accumulating mic audio. */
 void stop_streaming(void)
 {
     is_streaming_audio = false;
@@ -406,22 +402,14 @@ void stop_streaming(void)
 // ═════════════════════════════════════════════════════════════════════════════
 // Playback task  (pinned to Core 1)
 // ═════════════════════════════════════════════════════════════════════════════
-//
-// KEY DESIGN DECISION:
-//   This task is spawned exclusively from the RESPONSE.COMPLETE handler,
-//   which means every decoded Opus frame is already sitting in the ring buffer
-//   before we play a single sample.  There is therefore NO need for an underrun
-//   guard — we simply drain the buffer in MAX_PLAYBACK_CHUNK_SAMPLES (20 ms)
-//   chunks and exit cleanly when it is empty.
-//
-//   The chunk cap (480 samples = 20 ms) ensures the task yields back to the
-//   RTOS scheduler frequently so other Core-1 work (if any) remains responsive.
-//
-// FIX 4: Bulk copy with explicit wraparound handling replaces the previous
-//   byte-by-byte loop that was reading two bytes per iteration with index
-//   arithmetic — slow on PSRAM and holding the mutex for an unnecessarily
-//   long time.
 
+/**
+ * @brief Drain the playback ring buffer through the I2S DMA in 20 ms chunks.
+ *
+ * Spawned exclusively from the RESPONSE.COMPLETE handler after all Opus frames
+ * have been decoded into the ring buffer, so underruns are not possible.
+ * Signals @c ws_sem on completion to unblock process_query().
+ */
 static void playback_task(void *arg)
 {
     ESP_LOGI(TAG, "Playback task started on core %d", xPortGetCoreID());
@@ -440,14 +428,11 @@ static void playback_task(void *arg)
 
         size_t bytes_needed = samples_to_play * sizeof(int16_t);
 
-        // ── Read from ring buffer under mutex (bulk copy, wraparound-safe) ──
         if (xSemaphoreTake(playback_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
         {
-            // Re-check available under the lock (writer may have added more,
-            // but we only need what we already committed to playing).
             size_t avail_locked = get_buffered_audio_size();
             if (avail_locked < bytes_needed)
-                bytes_needed = avail_locked & ~1u; // keep 16-bit aligned
+                bytes_needed = avail_locked & ~1u;
             samples_to_play = bytes_needed / sizeof(int16_t);
 
             if (samples_to_play == 0) {
@@ -457,7 +442,6 @@ static void playback_task(void *arg)
 
             if (playback_read_pos + bytes_needed <= playback_buffer_capacity)
             {
-                // ── Fast path: contiguous region, no wraparound ──
                 int16_t *src = (int16_t *)(playback_buffer + playback_read_pos);
                 for (size_t i = 0; i < samples_to_play; i++) {
                     streaming_stereo_buffer[2 * i]     = src[i];
@@ -467,7 +451,6 @@ static void playback_task(void *arg)
             }
             else
             {
-                // ── Slow path: chunk straddles the ring buffer boundary ──
                 size_t first_bytes  = playback_buffer_capacity - playback_read_pos;
                 size_t second_bytes = bytes_needed - first_bytes;
                 size_t s1 = first_bytes  / sizeof(int16_t);
@@ -490,14 +473,12 @@ static void playback_task(void *arg)
         }
         else
         {
-            // Mutex timeout — unexpected; yield and retry once
             ESP_LOGW(TAG, "Playback mutex timeout");
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
 
-        // ── Write stereo frame to I2S DMA ────────────────────────────────────
-        size_t bytes_to_write = samples_to_play * 2 * sizeof(int16_t); // stereo
+        size_t bytes_to_write = samples_to_play * 2 * sizeof(int16_t);
         size_t written        = 0;
 
         esp_err_t ret = i2s_channel_write(tx_handle,
@@ -514,13 +495,11 @@ static void playback_task(void *arg)
         }
     }
 
-    // Brief drain delay — lets the DMA FIFO finish flushing
     vTaskDelay(pdMS_TO_TICKS(100));
 
     gpio_set_level(LED_PIN, 0);
     ESP_LOGI(TAG, "Playback complete");
 
-    // Unblock process_query() which is waiting for the full round-trip
     xSemaphoreGive(ws_sem);
 
     playback_task_handle = NULL;
@@ -528,9 +507,15 @@ static void playback_task(void *arg)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// WebSocket event handler  (runs on Core 0 inside the WS client task)
+// WebSocket event handler  (runs on Core 0)
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief Handle all WebSocket lifecycle and data events.
+ *
+ * Text frames carry JSON control messages; binary frames carry Opus-encoded
+ * audio packets that are decoded directly into the playback ring buffer.
+ */
 static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                     int32_t event_id, void *event_data)
 {
@@ -538,27 +523,23 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
     switch (event_id)
     {
-    // ── Connected ────────────────────────────────────────────────────────────
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "WebSocket connected");
         ws_connected = true;
         break;
 
-    // ── Disconnected ─────────────────────────────────────────────────────────
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "WebSocket disconnected");
-        ws_connected    = false;
-        audio_streaming = false;
+        ws_connected       = false;
+        audio_streaming    = false;
         is_streaming_audio = false;
         playback_complete  = true;
         reset_playback_buffer();
         xSemaphoreGive(ws_sem);
         break;
 
-    // ── Data ─────────────────────────────────────────────────────────────────
     case WEBSOCKET_EVENT_DATA:
 
-        // Text frame — JSON control messages
         if (data->op_code == 0x01)
         {
             char *text = strndup((char *)data->data_ptr, data->data_len);
@@ -574,7 +555,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
                 if (type && cJSON_IsString(type))
                 {
-                    // ── Server protocol messages ──────────────────────────────
                     if (strcmp(type->valuestring, "server") == 0 &&
                         msg && cJSON_IsString(msg))
                     {
@@ -586,10 +566,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                         }
                         else if (strcmp(msg->valuestring, "RESPONSE.COMPLETE") == 0)
                         {
-                            // All Opus packets have been received and decoded
-                            // into the ring buffer.  NOW start playback — this
-                            // guarantees zero underruns regardless of WiFi jitter.
-                            audio_streaming = false;
+                            audio_streaming   = false;
                             playback_complete = true;
                             ESP_LOGI(TAG, "RESPONSE.COMPLETE — launching playback "
                                      "(%u bytes buffered)",
@@ -598,19 +575,17 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                             if (!playback_started)
                             {
                                 playback_started = true;
-                                // FIX 3: Pin playback to Core 1
                                 xTaskCreatePinnedToCore(
                                     playback_task,
                                     "playback_task",
-                                    8192,   // FIX 2: 8 KB stack (was 4 KB)
+                                    8192,
                                     NULL,
                                     5,
                                     &playback_task_handle,
-                                    CORE_PLAYBACK);  // Core 1 — uncontested
+                                    CORE_PLAYBACK);
                             }
                         }
                     }
-                    // ── Legacy audio_start / audio_end (alternate server) ─────
                     else if (strcmp(type->valuestring, "audio_start") == 0)
                     {
                         audio_streaming = true;
@@ -636,7 +611,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                 CORE_PLAYBACK);
                         }
                     }
-                    // ── Informational ─────────────────────────────────────────
                     else if (strcmp(type->valuestring, "transcript") == 0 && msg)
                     {
                         ESP_LOGI(TAG, "Transcript: %s", msg->valuestring);
@@ -658,7 +632,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
             free(text);
         }
 
-        // Binary frame — Opus-encoded audio packet
         else if (data->op_code == 0x02)
         {
             if (!audio_streaming) {
@@ -678,9 +651,9 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
                 if (frame_size > 0)
                 {
-                    size_t bytes_decoded   = frame_size * sizeof(int16_t);
-                    size_t current_buf     = get_buffered_audio_size();
-                    size_t free_space      = playback_buffer_capacity - current_buf - 1;
+                    size_t bytes_decoded = frame_size * sizeof(int16_t);
+                    size_t current_buf   = get_buffered_audio_size();
+                    size_t free_space    = playback_buffer_capacity - current_buf - 1;
 
                     if (free_space < bytes_decoded) {
                         ESP_LOGW(TAG, "Ring buffer full — dropping %u decoded bytes",
@@ -710,7 +683,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
         }
         break;
 
-    // ── Error ────────────────────────────────────────────────────────────────
     case WEBSOCKET_EVENT_ERROR:
         ESP_LOGE(TAG, "WebSocket error");
         ws_connected       = false;
@@ -727,11 +699,15 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 // WebSocket init
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief Initialise the WebSocket client and block until connected (or timeout).
+ *
+ * Also allocates the DMA-aligned stereo interleave buffer used by playback_task.
+ */
 void websocket_init(void)
 {
     ws_sem = xSemaphoreCreateBinary();
 
-    // DMA-aligned stereo interleave buffer must live in internal RAM
     streaming_stereo_buffer = (int16_t *)heap_caps_malloc(
         MAX_PLAYBACK_CHUNK_SAMPLES * 2 * sizeof(int16_t),
         MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -746,9 +722,7 @@ void websocket_init(void)
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms   = 10000,
         .buffer_size          = 32768,
-        .task_stack           = 16384,  // Generous stack for Opus decoding
-        // The WS client task defaults to Core 0 — no explicit pin needed here
-        // because esp_websocket_client uses esp_event which runs on Core 0.
+        .task_stack           = 16384,
     };
 
     ws_client = esp_websocket_client_init(&ws_cfg);
@@ -772,6 +746,10 @@ void websocket_init(void)
 // Send helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief Resample a PCM chunk from 16 kHz to 24 kHz and send it as a binary
+ *        WebSocket frame.
+ */
 static esp_err_t send_audio_chunk_websocket(int16_t *audio_data,
                                              size_t sample_count)
 {
@@ -790,6 +768,10 @@ static esp_err_t send_audio_chunk_websocket(int16_t *audio_data,
     return ESP_OK;
 }
 
+/**
+ * @brief Send a JSON @c end_of_speech instruction to the server, signalling
+ *        that the user has finished speaking.
+ */
 static esp_err_t send_end_of_speech(void)
 {
     cJSON *json = cJSON_CreateObject();
@@ -811,9 +793,21 @@ static esp_err_t send_end_of_speech(void)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// process_query — record, stream to server, wait for playback
+// process_query
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief Record a full utterance, stream it to the server, and wait for
+ *        playback to complete.
+ *
+ * VAD drives the recording loop: recording stops on SILENCE_DURATION_MS of
+ * post-speech silence, NO_SPEECH_TIMEOUT_MS of no speech at all, or
+ * MAX_RECORDING_SECONDS absolute cap.
+ *
+ * @param buffer         Shared I2S read buffer (WakeNet chunk size).
+ * @param audio_chunksize Size of @p buffer in bytes.
+ * @param sample_count   Number of int16_t samples in @p buffer.
+ */
 void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
 {
     if (!ws_connected) {
@@ -826,7 +820,6 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
         }
     }
 
-    // Reset all playback state for this new round-trip
     playback_complete = false;
     audio_streaming   = false;
     reset_playback_buffer();
@@ -835,11 +828,11 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
     gpio_set_level(LED_PIN, 1);
     start_streaming();
 
-    int64_t recording_start = esp_timer_get_time();
-    int64_t silence_start   = 0;
-    bool    speech_detected = false;
-    bool    in_silence      = false;
-    int     chunks_recorded = 0;
+    int64_t recording_start  = esp_timer_get_time();
+    int64_t silence_start    = 0;
+    bool    speech_detected  = false;
+    bool    in_silence       = false;
+    int     chunks_recorded  = 0;
     float   speech_threshold = SILENCE_THRESHOLD * SPEECH_ENERGY_MULTIPLIER;
 
     while (1)
@@ -853,7 +846,6 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
         i2s_channel_read(rx_handle, buffer, audio_chunksize,
                          &bytes_read, portMAX_DELAY);
 
-        // Apply microphone gain
         for (int i = 0; i < sample_count; i++) {
             int32_t s = (int32_t)buffer[i] * GAIN_BOOSTER;
             if (s >  32767) s =  32767;
@@ -866,7 +858,6 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
 
         send_audio_chunk_websocket(buffer, sample_count);
 
-        // ── No-speech timeout ──────────────────────────────────────────────
         if (!speech_detected) {
             int64_t elapsed_ms = (esp_timer_get_time() - recording_start) / 1000;
             if (elapsed_ms >= NO_SPEECH_TIMEOUT_MS) {
@@ -877,14 +868,12 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
             }
         }
 
-        // ── Speech onset ───────────────────────────────────────────────────
         if (!speech_detected && energy > speech_threshold) {
             ESP_LOGI(TAG, "Speech started (energy=%.1f)", energy);
             speech_detected = true;
             in_silence      = false;
         }
 
-        // ── Silence / max-duration detection ──────────────────────────────
         if (speech_detected) {
             if (energy < SILENCE_THRESHOLD) {
                 if (!in_silence) {
@@ -922,7 +911,6 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
 
     send_end_of_speech();
 
-    // Wait for playback_task to signal completion (or timeout after 120 s)
     if (xSemaphoreTake(ws_sem, pdMS_TO_TICKS(120000)) != pdTRUE) {
         ESP_LOGW(TAG, "Response/playback timeout");
         audio_streaming  = false;
@@ -934,7 +922,6 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
         }
     }
 
-    // Brief settling delay before the next wake-word listen cycle
     vTaskDelay(pdMS_TO_TICKS(100));
 }
 
@@ -942,6 +929,12 @@ void process_query(int16_t *buffer, int audio_chunksize, int sample_count)
 // Calibration
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief Measure ambient noise to set an adaptive silence threshold.
+ *
+ * Reads CALIBRATION_SAMPLES frames from the mic, computes their average RMS
+ * energy, and clamps the resulting threshold to [150, 1500].
+ */
 void calibrate_silence_threshold(int16_t *buffer, int audio_chunksize,
                                   int sample_count)
 {
@@ -955,10 +948,10 @@ void calibrate_silence_threshold(int16_t *buffer, int audio_chunksize,
         total_energy += calculate_audio_energy(buffer, sample_count);
     }
 
-    float avg_ambient  = total_energy / CALIBRATION_SAMPLES;
-    SILENCE_THRESHOLD  = avg_ambient * SILENCE_MULTIPLIER;
+    float avg_ambient = total_energy / CALIBRATION_SAMPLES;
+    SILENCE_THRESHOLD = avg_ambient * SILENCE_MULTIPLIER;
 
-    if (SILENCE_THRESHOLD < 150.0f) SILENCE_THRESHOLD = 150.0f;
+    if (SILENCE_THRESHOLD < 150.0f)  SILENCE_THRESHOLD = 150.0f;
     if (SILENCE_THRESHOLD > 1500.0f) SILENCE_THRESHOLD = 1500.0f;
 
     ESP_LOGI(TAG, "Calibration done — silence=%.0f  speech=%.0f",
@@ -969,6 +962,7 @@ void calibrate_silence_threshold(int16_t *buffer, int audio_chunksize,
 // Utility
 // ═════════════════════════════════════════════════════════════════════════════
 
+/** @brief Blink the status LED @p n times (200 ms on / 200 ms off). */
 void blink(int n)
 {
     for (int i = 0; i < n; i++) {
@@ -980,14 +974,14 @@ void blink(int n)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Wake-word task  (pinned to Core 0, alongside WiFi / WebSocket)
+// Wake-word task  (pinned to Core 0)
 // ═════════════════════════════════════════════════════════════════════════════
-//
-// FIX 5: Moved the main WakeNet loop out of app_main into a dedicated task so
-//   we can pin it to Core 0 with xTaskCreatePinnedToCore and then have
-//   app_main delete itself — giving FreeRTOS a clean task topology where
-//   Core 0 owns all network/recognition work and Core 1 owns audio playback.
 
+/**
+ * @brief Continuously listen for the wake word and dispatch process_query().
+ *
+ * Runs on Core 0 alongside the WiFi driver and WebSocket client task.
+ */
 static void wake_word_task(void *arg)
 {
     srmodel_list_t *models = esp_srmodel_init("model");
@@ -1032,16 +1026,19 @@ static void wake_word_task(void *arg)
         }
     }
 
-    // Unreachable — but good practice
     wakenet->destroy(model_data);
     free(buffer);
     vTaskDelete(NULL);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// app_main — one-time init then hand off to pinned tasks
+// app_main
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief One-time hardware/software init; launches wake_word_task on Core 0
+ *        then deletes itself.
+ */
 void app_main(void)
 {
     led_init();
@@ -1051,25 +1048,17 @@ void app_main(void)
     init_recording_buffer();
     websocket_init();
 
-    // FIX 3 + 5: Launch the wake-word loop as a pinned task on Core 0 so
-    // app_main (which runs on Core 1 by default on the S3) can exit cleanly.
-    // This gives us:
-    //   Core 0 — WiFi driver, WebSocket client task, WakeNet recognition,
-    //            process_query recording loop, Opus decode (WS event handler)
-    //   Core 1 — I2S playback renderer (playback_task, spawned on demand)
     xTaskCreatePinnedToCore(
         wake_word_task,
         "wake_word_task",
-        8192,           // 8 KB — comfortable for WakeNet + process_query stack
+        8192,
         NULL,
         4,
         NULL,
-        CORE_NETWORK);  // Core 0
+        CORE_NETWORK);
 
-    // app_main's job is done; delete this task to free its stack
     vTaskDelete(NULL);
 
-    // Cleanup code below is unreachable at runtime but left for completeness
     if (opus_decoder)       opus_decoder_destroy(opus_decoder);
     if (opus_decode_buffer) free(opus_decode_buffer);
     if (resample_buffer)    free(resample_buffer);

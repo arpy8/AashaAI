@@ -1,27 +1,18 @@
 """
-AashaAI: Mental Health Voice Bot — WebSocket server
-==========================================
-Protocol (matches ESP32 firmware):
+AashaAI hardware server — WebSocket voice pipeline.
 
-  ESP32  → server : binary  — raw PCM chunks (16-bit, 24 kHz, mono) during speech
+Protocol (ESP32 ↔ server):
+  ESP32  → server : binary  — raw PCM chunks (16-bit, 24 kHz, mono)
   ESP32  → server : text    — {"type":"instruction","msg":"end_of_speech"}
   server → ESP32  : text    — {"type":"server",     "msg":"RESPONSE.CREATED"}
   server → ESP32  : text    — {"type":"transcript", "msg":"<text>"}
   server → ESP32  : text    — {"type":"response",   "msg":"<text>"}
-  server → ESP32  : binary  — Opus-encoded audio packets (one packet per frame)
+  server → ESP32  : binary  — Opus-encoded audio packets (one per frame)
   server → ESP32  : text    — {"type":"server",     "msg":"RESPONSE.COMPLETE"}
-  server → ESP32  : text    — {"type":"error",      "msg":"<reason>"}  (on error)
-
-KEY FIX — real-time Opus pacing:
-  Previously all TTS audio was generated then blasted in a tight loop with only
-  asyncio.sleep(0) between packets.  This caused the ESP32 ring buffer to flood
-  immediately then starve once the burst was over, producing repeated underruns.
-
-  Now each Opus packet is sent with a delay of FRAME_PACING_S (≈ 16 ms) so the
-  ESP32 receives audio at roughly the same rate it consumes it.  The result is a
-  smooth, continuously-filled ring buffer and zero underruns under normal WiFi.
+  server → ESP32  : text    — {"type":"error",      "msg":"<reason>"}
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -31,7 +22,6 @@ import wave
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-import asyncio
 import httpx
 import numpy as np
 import opuslib
@@ -43,13 +33,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse
 from faster_whisper import WhisperModel
-
 from google import genai
 from google.genai import types
 
 load_dotenv()
 
-# ─── Logging ─────────────────────────────────────────────────────────────────
+# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -61,31 +50,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("Missing GEMINI_API_KEY")
 
-SERVER_SAMPLE_RATE = 24000   # ESP32 resamples mic to 24 kHz before sending
-OPUS_FRAME_MS      = 20      # 20 ms Opus frames → 480 samples @ 24 kHz
+SERVER_SAMPLE_RATE = 24000
+OPUS_FRAME_MS      = 20
 OPUS_FRAME_SAMPLES = SERVER_SAMPLE_RATE * OPUS_FRAME_MS // 1000  # 480
 
-# ─── FIX: Real-time pacing ────────────────────────────────────────────────────
-# Send each Opus packet with a slight lead over real-time so the ESP32 ring
-# buffer is kept comfortably ahead of playback without ever being flooded.
-#
-# FRAME_PACING_FACTOR < 1.0  →  send slightly faster than real-time.
-# 0.90 = 90% of frame duration = 18 ms per packet.  Compared to the previous
-# 0.80 (16 ms), this gives the ESP32 a larger cushion on lossy WiFi where a
-# single retransmit stall can otherwise drain the ring buffer mid-utterance.
-#
-# Why not asyncio.sleep(0)? That effectively sends all packets as fast as TCP
-# allows — flooding the ESP32 ring buffer then leaving it starved.
-#
-# Why deadline-based and not per-packet sleep?
-# asyncio.sleep has ~15.6 ms granularity on Windows.  Sleeping 18 ms per
-# packet often sleeps 30+ ms instead, and that error ACCUMULATES across the
-# entire stream.  A 50-packet response drifts by up to 25 *extra* seconds on
-# Windows.  We instead track the stream start time and compute the remaining
-# sleep to the *absolute* deadline — so errors average out rather than stack.
-FRAME_DURATION_S   = OPUS_FRAME_MS / 1000.0          # 0.020 s
-FRAME_PACING_FACTOR = 0.90                            # 90% of real-time
-FRAME_PACING_S      = FRAME_DURATION_S * FRAME_PACING_FACTOR  # 0.018 s
+# Deadline-based Opus pacing: each packet is sent at 90% of its real-time
+# deadline.  Tracking absolute deadlines (rather than sleeping per-packet)
+# prevents timer-granularity errors from accumulating across a long stream.
+FRAME_DURATION_S    = OPUS_FRAME_MS / 1000.0
+FRAME_PACING_FACTOR = 0.90
+FRAME_PACING_S      = FRAME_DURATION_S * FRAME_PACING_FACTOR
 
 # ─── System prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a warm, empathetic voice companion for college students going
@@ -119,10 +93,10 @@ silero_model               = None
 silero_sample_rate: int    = SERVER_SAMPLE_RATE
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Model loading
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Model loading ────────────────────────────────────────────────────────────
+
 def load_whisper() -> WhisperModel:
+    """Load the Faster-Whisper base.en model on CPU with int8 quantisation."""
     logger.info("Loading Faster-Whisper model…")
     model = WhisperModel("base.en", device="cpu", compute_type="int8")
     logger.info("Faster-Whisper loaded.")
@@ -130,6 +104,7 @@ def load_whisper() -> WhisperModel:
 
 
 def load_silero():
+    """Load the Silero v3 English TTS model from torch.hub."""
     logger.info("Loading Silero TTS model…")
     model, _ = torch.hub.load(
         repo_or_dir="snakers4/silero-models",
@@ -142,11 +117,11 @@ def load_silero():
     return model, SERVER_SAMPLE_RATE
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Lifespan
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Lifespan ────────────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Load models and create shared HTTP client on startup; clean up on shutdown."""
     global whisper_model, silero_model, silero_sample_rate
 
     loop = asyncio.get_event_loop()
@@ -163,9 +138,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown: HTTP client closed.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# App
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── App ──────────────────────────────────────────────────────────────────────
+
 app = FastAPI(
     title="Mental Health Voice Bot API",
     version="3.1.0",
@@ -184,9 +158,8 @@ app.add_middleware(
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Audio helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Audio helpers ────────────────────────────────────────────────────────────
+
 def save_audio_to_temp(
     audio_bytes: bytes,
     source: str = "ws",
@@ -194,7 +167,7 @@ def save_audio_to_temp(
     channels: int = 1,
     sampwidth: int = 2,
 ) -> str:
-    """Persist received PCM audio as WAV in temp/ for debugging."""
+    """Persist received PCM audio as a WAV file in temp/ for debugging."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filename  = f"{source}_{timestamp}.wav"
     filepath  = os.path.join(TEMP_DIR, filename)
@@ -215,11 +188,10 @@ def save_audio_to_temp(
     return filepath
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STT — Faster-Whisper
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── STT — Faster-Whisper ─────────────────────────────────────────────────────
+
 def _run_whisper(audio_bytes: bytes) -> str:
-    """Decode raw 24 kHz PCM bytes (or a WAV blob) and transcribe."""
+    """Transcribe raw 24 kHz PCM bytes (or a WAV blob) using Faster-Whisper."""
     try:
         is_wav = audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE"
         if is_wav:
@@ -254,17 +226,18 @@ def _run_whisper(audio_bytes: bytes) -> str:
 
 
 async def stt_faster_whisper(audio_bytes: bytes) -> str:
+    """Async wrapper that offloads Whisper inference to a thread executor."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _run_whisper, audio_bytes)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM — Gemini
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── LLM — Gemini ─────────────────────────────────────────────────────────────
+
 _gemini_client = genai.Client()
 
+
 async def chat_gemini(prompt: str, _unused_client=None) -> str:
-    """Call Gemini 2.5 Flash via the google-genai SDK with async + retry."""
+    """Call Gemini 2.5 Flash with automatic retry on transient server errors."""
     for attempt in range(3):
         try:
             response = await _gemini_client.aio.models.generate_content(
@@ -295,11 +268,10 @@ async def chat_gemini(prompt: str, _unused_client=None) -> str:
     return "Sorry, I couldn't understand that."
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TTS — Silero  (returns raw PCM bytes, 16-bit, 24 kHz, mono)
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── TTS — Silero ─────────────────────────────────────────────────────────────
+
 def _run_silero_tts(text: str) -> bytes:
-    """Synthesise speech with Silero TTS. Returns raw 16-bit PCM bytes."""
+    """Synthesise speech with Silero TTS. Returns raw 16-bit PCM bytes at 24 kHz."""
     try:
         with torch.no_grad():
             audio_tensor = silero_model.apply_tts(
@@ -307,11 +279,10 @@ def _run_silero_tts(text: str) -> bytes:
                 speaker="en_0",
                 sample_rate=silero_sample_rate,
             )
-        audio_np   = audio_tensor.numpy()
-        audio_i16  = (audio_np * 32767).clip(-32768, 32767).astype(np.int16)
-        pcm_bytes  = audio_i16.tobytes()
+        audio_np  = audio_tensor.numpy()
+        audio_i16 = (audio_np * 32767).clip(-32768, 32767).astype(np.int16)
+        pcm_bytes = audio_i16.tobytes()
 
-        # Debug WAV
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         wav_path  = os.path.join(TEMP_DIR, f"tts_{timestamp}.wav")
         with wave.open(wav_path, "wb") as wf:
@@ -326,22 +297,19 @@ def _run_silero_tts(text: str) -> bytes:
         return b""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Opus encoder helper
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Opus encoder ─────────────────────────────────────────────────────────────
+
 def encode_pcm_to_opus(pcm_bytes: bytes) -> list[bytes]:
     """
     Encode raw 16-bit mono 24 kHz PCM into a list of Opus packets.
-    Each packet covers OPUS_FRAME_MS ms (480 samples at 24 kHz).
+
+    Each packet covers OPUS_FRAME_MS milliseconds (480 samples at 24 kHz).
     """
-    encoder = opuslib.Encoder(
-        SERVER_SAMPLE_RATE, 1, opuslib.APPLICATION_VOIP
-    )
-    samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+    encoder = opuslib.Encoder(SERVER_SAMPLE_RATE, 1, opuslib.APPLICATION_VOIP)
+    samples  = np.frombuffer(pcm_bytes, dtype=np.int16)
     packets: list[bytes] = []
 
-    for offset in range(0, len(samples) - OPUS_FRAME_SAMPLES + 1,
-                        OPUS_FRAME_SAMPLES):
+    for offset in range(0, len(samples) - OPUS_FRAME_SAMPLES + 1, OPUS_FRAME_SAMPLES):
         frame  = samples[offset : offset + OPUS_FRAME_SAMPLES].tobytes()
         packet = encoder.encode(frame, OPUS_FRAME_SAMPLES)
         packets.append(packet)
@@ -350,15 +318,22 @@ def encode_pcm_to_opus(pcm_bytes: bytes) -> list[bytes]:
     return packets
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Shared pipeline: STT → LLM
-# Returns (transcript, reply, saved_path)
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Shared pipeline ──────────────────────────────────────────────────────────
+
 async def run_pipeline(
     audio_bytes: bytes,
     client: httpx.AsyncClient,
     source: str = "ws",
 ) -> tuple[str, str, str]:
+    """
+    Run the full STT → LLM pipeline.
+
+    Returns:
+        (transcript, reply, saved_path)
+
+    Raises:
+        ValueError: if no speech is detected in the audio.
+    """
     loop       = asyncio.get_event_loop()
     saved_path = await loop.run_in_executor(
         None, save_audio_to_temp, audio_bytes, source
@@ -372,32 +347,33 @@ async def run_pipeline(
     return transcript, reply, saved_path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers: send typed JSON frames
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── WebSocket helpers ────────────────────────────────────────────────────────
+
 async def ws_send_json(ws: WebSocket, **kwargs) -> None:
+    """Serialise keyword arguments as JSON and send as a text frame."""
     await ws.send_text(json.dumps(kwargs))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Health
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Health ───────────────────────────────────────────────────────────────────
+
 @app.get("/health")
 async def health_check():
+    """Return server health status."""
     return {"status": "healthy", "version": "3.1.0"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WebSocket endpoint — primary ESP32 interface
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── WebSocket endpoint ───────────────────────────────────────────────────────
+
 @app.websocket("/")
 async def websocket_chat(websocket: WebSocket):
     """
-    Streaming protocol:
+    Primary ESP32 interface over WebSocket.
+
+    Flow per utterance:
       1. ESP32 streams binary PCM chunks while the user speaks.
       2. ESP32 sends {"type":"instruction","msg":"end_of_speech"}.
-      3. Server sends RESPONSE.CREATED, runs STT+LLM+TTS, streams Opus binary
-         packets back with real-time pacing, then sends RESPONSE.COMPLETE.
+      3. Server sends RESPONSE.CREATED, runs STT → LLM → TTS, streams Opus
+         packets with deadline-based pacing, then sends RESPONSE.COMPLETE.
       4. Steps 1–3 repeat for subsequent utterances.
     """
     await websocket.accept()
@@ -410,12 +386,10 @@ async def websocket_chat(websocket: WebSocket):
         while True:
             message = await websocket.receive()
 
-            # ── Incoming binary: raw PCM audio chunk ─────────────────────────
             if "bytes" in message and message["bytes"]:
                 audio_chunks.append(message["bytes"])
                 continue
 
-            # ── Incoming text: JSON control message ──────────────────────────
             if "text" not in message or not message["text"]:
                 continue
 
@@ -428,23 +402,18 @@ async def websocket_chat(websocket: WebSocket):
             msg_type = data.get("type", "")
             msg_body = data.get("msg", "")
 
-            # ── end_of_speech ─────────────────────────────────────────────────
             if msg_type == "instruction" and msg_body == "end_of_speech":
                 if not audio_chunks:
                     logger.warning("end_of_speech with no audio buffered")
-                    await ws_send_json(websocket,
-                                       type="error", msg="no audio received")
+                    await ws_send_json(websocket, type="error", msg="no audio received")
                     continue
 
                 audio_bytes  = b"".join(audio_chunks)
                 audio_chunks = []
-                logger.info("end_of_speech: %d PCM bytes accumulated",
-                            len(audio_bytes))
+                logger.info("end_of_speech: %d PCM bytes accumulated", len(audio_bytes))
 
-                await ws_send_json(websocket, type="server",
-                                   msg="RESPONSE.CREATED")
+                await ws_send_json(websocket, type="server", msg="RESPONSE.CREATED")
 
-                # ── STT + LLM ─────────────────────────────────────────────────
                 client = app.state.http_client
                 try:
                     transcript, reply, saved_path = await run_pipeline(
@@ -453,8 +422,7 @@ async def websocket_chat(websocket: WebSocket):
                 except ValueError as ve:
                     logger.warning("Pipeline error: %s", ve)
                     await ws_send_json(websocket, type="error", msg=str(ve))
-                    await ws_send_json(websocket, type="server",
-                                       msg="RESPONSE.COMPLETE")
+                    await ws_send_json(websocket, type="server", msg="RESPONSE.COMPLETE")
                     continue
 
                 logger.info("Audio saved: %s", saved_path)
@@ -462,25 +430,8 @@ async def websocket_chat(websocket: WebSocket):
                 await ws_send_json(websocket, type="transcript", msg=transcript)
                 await ws_send_json(websocket, type="response",   msg=reply)
 
-                # ── TTS → Opus → binary frames with real-time pacing ──────────
-                #
-                # FIX: The original code used asyncio.sleep(0) which effectively
-                # sent all packets as fast as TCP could carry them — flooding the
-                # ESP32 ring buffer immediately and then leaving it starved for
-                # the remainder of playback (causing repeated underruns).
-                #
-                # We now pace each packet at FRAME_PACING_S (≈ 16 ms, 80% of
-                # the 20 ms frame duration).  This keeps the ESP32 ring buffer
-                # filled at roughly the same rate as consumption, giving it a
-                # small but stable lead cushion without any risk of overflow.
-                #
-                # FRAME_PACING_FACTOR = 0.80 means we stay ~20% ahead of the
-                # playback clock — enough to absorb WiFi jitter without building
-                # up enough surplus to overflow the ring buffer.
                 loop      = asyncio.get_event_loop()
-                pcm_bytes = await loop.run_in_executor(
-                    None, _run_silero_tts, reply
-                )
+                pcm_bytes = await loop.run_in_executor(None, _run_silero_tts, reply)
 
                 if pcm_bytes:
                     opus_packets = await loop.run_in_executor(
@@ -488,21 +439,15 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     total = len(opus_packets)
                     logger.info(
-                        "Streaming %d Opus packets at %.0f ms/pkt pacing "
-                        "(%.0f%% real-time)",
+                        "Streaming %d Opus packets at %.0f ms/pkt pacing (%.0f%% real-time)",
                         total,
                         FRAME_PACING_S * 1000,
                         FRAME_PACING_FACTOR * 100,
                     )
-                    # Deadline-based pacing: instead of sleeping FRAME_PACING_S
-                    # per packet (which accumulates timer granularity errors,
-                    # especially on Windows where asyncio.sleep has ~15 ms
-                    # resolution), we track the stream start time and sleep only
-                    # the remaining time to the absolute per-packet deadline.
                     stream_start = time.monotonic()
                     for idx, packet in enumerate(opus_packets):
                         await websocket.send_bytes(packet)
-                        deadline = stream_start + (idx + 1) * FRAME_PACING_S
+                        deadline  = stream_start + (idx + 1) * FRAME_PACING_S
                         remaining = deadline - time.monotonic()
                         if remaining > 0:
                             await asyncio.sleep(remaining)
@@ -510,8 +455,7 @@ async def websocket_chat(websocket: WebSocket):
                 else:
                     logger.error("TTS returned empty audio")
 
-                await ws_send_json(websocket, type="server",
-                                   msg="RESPONSE.COMPLETE")
+                await ws_send_json(websocket, type="server", msg="RESPONSE.COMPLETE")
                 logger.info("Pipeline complete for %s", client_host)
 
     except WebSocketDisconnect:
@@ -525,14 +469,15 @@ async def websocket_chat(websocket: WebSocket):
             pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP POST — fallback / testing endpoint
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── HTTP fallback endpoint ───────────────────────────────────────────────────
+
 @app.post("/api/chat")
 async def http_chat(request: Request):
     """
-    Accept a raw PCM body (same format as WebSocket), run the full pipeline,
-    and stream back:  header text  +  "---AUDIO---\\n"  +  raw PCM bytes.
+    Accept a raw PCM body and return the full pipeline result as a stream.
+
+    Response format:
+        TRANSCRIPT:<text>\\nREPLY:<text>\\n---AUDIO---\\n<raw PCM bytes>
     """
     try:
         audio_data = await request.body()
