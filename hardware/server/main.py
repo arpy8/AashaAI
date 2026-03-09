@@ -41,9 +41,17 @@ load_dotenv()
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("aasha")
+
+def _sep(title: str = "", width: int = 60) -> str:
+    """Return a titled separator line for log readability."""
+    if title:
+        pad = width - len(title) - 4
+        return f"{'─' * 2} {title} {'─' * max(pad, 2)}"
+    return "─" * width
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -98,7 +106,7 @@ silero_sample_rate: int    = SERVER_SAMPLE_RATE
 def load_whisper() -> WhisperModel:
     """Load the Faster-Whisper base.en model on CPU with int8 quantisation."""
     logger.info("Loading Faster-Whisper model…")
-    model = WhisperModel("base.en", device="cpu", compute_type="int8")
+    model = WhisperModel("medium.en", device="cpu", compute_type="int8")
     logger.info("Faster-Whisper loaded.")
     return model
 
@@ -183,8 +191,11 @@ def save_audio_to_temp(
             wf.setframerate(sample_rate)
             wf.writeframes(audio_bytes)
 
-    logger.info("Saved mic audio → %s  (%d bytes, raw_wav=%s)",
-                filepath, len(audio_bytes), is_wav)
+    duration_s = len(audio_bytes) / (sample_rate * sampwidth * channels)
+    logger.info(
+        "  mic audio saved  path=%-40s  size=%d B  duration=%.2f s  wav=%s",
+        os.path.basename(filepath), len(audio_bytes), duration_s, is_wav,
+    )
     return filepath
 
 
@@ -217,23 +228,72 @@ def _run_whisper(audio_bytes: bytes) -> str:
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=300),
         )
-        text = " ".join(seg.text for seg in segments).strip()
-        logger.info("Whisper | lang=%s | %s", info.language, text[:80])
+        segments_list = list(segments)
+        text = " ".join(seg.text for seg in segments_list).strip()
+        logger.info(
+            "  STT done  lang=%s  prob=%.2f  segments=%d  text=%r",
+            info.language, info.language_probability,
+            len(segments_list), text[:120],
+        )
         return text
     except Exception as exc:
-        logger.error("Whisper STT error: %s", exc)
+        logger.error("  STT error: %s", exc)
         return ""
 
 
 async def stt_faster_whisper(audio_bytes: bytes) -> str:
     """Async wrapper that offloads Whisper inference to a thread executor."""
+    logger.info("  STT start  input=%d B  (%.2f s audio)",
+                len(audio_bytes), len(audio_bytes) / (SERVER_SAMPLE_RATE * 2))
+    t0 = time.monotonic()
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _run_whisper, audio_bytes)
+    result = await loop.run_in_executor(None, _run_whisper, audio_bytes)
+    logger.info("  STT took %.2f s", time.monotonic() - t0)
+    return result
 
 
 # ─── LLM — Gemini ─────────────────────────────────────────────────────────────
 
 _gemini_client = genai.Client()
+
+
+def _sanitize_for_tts(text: str) -> str:
+    """
+    Prepare a Gemini reply for Silero TTS.
+
+    Silero expects plain ASCII-range text.  The previous approach used
+    encode("ascii", "ignore") which silently *drops* non-ASCII bytes,
+    mangling or truncating sentences whenever Gemini emits an em-dash,
+    smart quote, ellipsis, or similar typographic character.
+
+    This function instead *transliterates* common Unicode punctuation to
+    their plain-ASCII equivalents so the full sentence survives intact,
+    then strips any remaining non-ASCII characters that have no reasonable
+    ASCII stand-in.
+    """
+    replacements = {
+        "\u2019": "'",    # right single quotation mark -> apostrophe
+        "\u2018": "'",    # left  single quotation mark -> apostrophe
+        "\u201c": '"',   # left  double quotation mark -> straight quote
+        "\u201d": '"',   # right double quotation mark -> straight quote
+        "\u2014": " - ",  # em dash                     -> spaced hyphen
+        "\u2013": " - ",  # en dash                     -> spaced hyphen
+        "\u2026": "...",  # horizontal ellipsis          -> three dots
+        "\u00e9": "e",    # e-acute (cafe, resume, etc.)
+        "\u00e8": "e",
+        "\u00ea": "e",
+        "\u00e0": "a",
+        "\u00e2": "a",
+        "\u00f4": "o",
+        "\u00fb": "u",
+        "\u00e7": "c",
+        "\u00f1": "n",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    # Drop anything still outside printable ASCII
+    text = text.encode("ascii", "ignore").decode("ascii")
+    return text.strip()
 
 
 async def chat_gemini(prompt: str, _unused_client=None) -> str:
@@ -245,13 +305,16 @@ async def chat_gemini(prompt: str, _unused_client=None) -> str:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
-                    max_output_tokens=120,
+                    max_output_tokens=200,   # raised: 120 was cutting replies mid-sentence
                     temperature=0.6,
                 ),
             )
-            reply = response.text.strip()
-            reply = reply.encode("ascii", "ignore").decode("ascii")
-            logger.info("Gemini reply: %s", reply[:80])
+            reply = _sanitize_for_tts(response.text)
+            word_count = len(reply.split())
+            logger.info(
+                "  LLM done  words=%d  chars=%d  reply=%r",
+                word_count, len(reply), reply[:120],
+            )
             return reply
 
         except Exception as exc:
@@ -262,7 +325,7 @@ async def chat_gemini(prompt: str, _unused_client=None) -> str:
                                attempt + 1, wait, exc)
                 await asyncio.sleep(wait)
                 continue
-            logger.error("Gemini LLM error: %s", exc)
+            logger.error("  LLM error (attempt %d): %s", attempt + 1, exc)
             return "Sorry, something went wrong."
 
     return "Sorry, I couldn't understand that."
@@ -273,6 +336,7 @@ async def chat_gemini(prompt: str, _unused_client=None) -> str:
 def _run_silero_tts(text: str) -> bytes:
     """Synthesise speech with Silero TTS. Returns raw 16-bit PCM bytes at 24 kHz."""
     try:
+        t0 = time.monotonic()
         with torch.no_grad():
             audio_tensor = silero_model.apply_tts(
                 text=text,
@@ -282,6 +346,8 @@ def _run_silero_tts(text: str) -> bytes:
         audio_np  = audio_tensor.numpy()
         audio_i16 = (audio_np * 32767).clip(-32768, 32767).astype(np.int16)
         pcm_bytes = audio_i16.tobytes()
+        tts_duration_s = len(pcm_bytes) / (silero_sample_rate * 2)
+        tts_elapsed    = time.monotonic() - t0
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         wav_path  = os.path.join(TEMP_DIR, f"tts_{timestamp}.wav")
@@ -290,10 +356,15 @@ def _run_silero_tts(text: str) -> bytes:
             wf.setsampwidth(2)
             wf.setframerate(silero_sample_rate)
             wf.writeframes(pcm_bytes)
-        logger.info("TTS WAV → %s  (%d PCM bytes)", wav_path, len(pcm_bytes))
+        logger.info(
+            "  TTS done  took=%.2f s  audio_duration=%.2f s  pcm=%d B  rtf=%.2fx  file=%s",
+            tts_elapsed, tts_duration_s, len(pcm_bytes),
+            tts_elapsed / max(tts_duration_s, 0.001),
+            os.path.basename(wav_path),
+        )
         return pcm_bytes
     except Exception as exc:
-        logger.error("Silero TTS error: %s", exc)
+        logger.error("  TTS error: %s", exc)
         return b""
 
 
@@ -314,7 +385,12 @@ def encode_pcm_to_opus(pcm_bytes: bytes) -> list[bytes]:
         packet = encoder.encode(frame, OPUS_FRAME_SAMPLES)
         packets.append(packet)
 
-    logger.info("Opus: %d PCM bytes → %d packets", len(pcm_bytes), len(packets))
+    audio_duration_s = len(pcm_bytes) / (SERVER_SAMPLE_RATE * 2)
+    logger.info(
+        "  Opus encode  pcm=%d B  packets=%d  audio=%.2f s  avg_pkt=%.0f B",
+        len(pcm_bytes), len(packets), audio_duration_s,
+        len(pcm_bytes) / max(len(packets), 1) / (OPUS_FRAME_SAMPLES * 2) * sum(len(p) for p in packets) / max(len(packets), 1),
+    )
     return packets
 
 
@@ -334,16 +410,24 @@ async def run_pipeline(
     Raises:
         ValueError: if no speech is detected in the audio.
     """
-    loop       = asyncio.get_event_loop()
+    pipeline_start = time.monotonic()
+    loop           = asyncio.get_event_loop()
+
+    logger.info(_sep("STT"))
     saved_path = await loop.run_in_executor(
         None, save_audio_to_temp, audio_bytes, source
     )
-
     transcript = await stt_faster_whisper(audio_bytes)
     if not transcript:
+        logger.warning("  STT returned empty — no speech detected")
         raise ValueError("NO_SPEECH")
 
+    logger.info(_sep("LLM"))
+    t_llm = time.monotonic()
     reply = await chat_gemini(transcript, client)
+    logger.info("  LLM took %.2f s", time.monotonic() - t_llm)
+
+    logger.info("  pipeline total %.2f s", time.monotonic() - pipeline_start)
     return transcript, reply, saved_path
 
 
@@ -375,21 +459,62 @@ async def websocket_chat(websocket: WebSocket):
       3. Server sends RESPONSE.CREATED, runs STT → LLM → TTS, streams Opus
          packets with deadline-based pacing, then sends RESPONSE.COMPLETE.
       4. Steps 1–3 repeat for subsequent utterances.
+
+    Disconnect handling:
+      WebSocketDisconnect is caught and logged cleanly.  The low-level
+      websockets library raises on any attempt to receive() after the close
+      frame arrives, so we also catch Exception and distinguish disconnect
+      signals by checking the message type before every receive().
     """
     await websocket.accept()
     client_host = websocket.client.host
-    logger.info("WebSocket connected: %s", client_host)
+    logger.info(_sep("ESP32 CONNECTED"))
+    logger.info("  host=%s", client_host)
 
     audio_chunks: list[bytes] = []
+    session_start = time.monotonic()
+    utterance_n   = 0
 
     try:
         while True:
-            message = await websocket.receive()
+            # ── Receive next frame ────────────────────────────────────────────
+            try:
+                message = await websocket.receive()
+            except WebSocketDisconnect:
+                # Clean close initiated by the client.
+                raise
+            except Exception as exc:
+                # The underlying websockets library raises
+                # "Cannot call receive() once a disconnect message has been
+                # received" when the close frame has already been processed.
+                # Treat any receive-time exception as a clean disconnect.
+                logger.info(
+                    "WebSocket receive() raised after close for %s: %s",
+                    client_host, exc,
+                )
+                return
 
+            # ── Detect close frame delivered as a message dict ────────────────
+            msg_type = message.get("type", "")
+            if msg_type == "websocket.disconnect":
+                logger.info("WebSocket close frame received from %s", client_host)
+                return
+
+            # ── Binary: accumulate PCM audio ──────────────────────────────────
             if "bytes" in message and message["bytes"]:
                 audio_chunks.append(message["bytes"])
+                n = len(audio_chunks)
+                if n == 1:
+                    logger.info("  [ESP32→SVR] first PCM chunk received — recording in progress")
+                elif n % 20 == 0:
+                    accumulated = sum(len(c) for c in audio_chunks)
+                    logger.info(
+                        "  [ESP32→SVR] buffering...  chunks=%d  accumulated=%d B  (%.2f s)",
+                        n, accumulated, accumulated / (SERVER_SAMPLE_RATE * 2),
+                    )
                 continue
 
+            # ── Text: handle control messages ─────────────────────────────────
             if "text" not in message or not message["text"]:
                 continue
 
@@ -399,69 +524,113 @@ async def websocket_chat(websocket: WebSocket):
                 logger.warning("Non-JSON text frame: %s", message["text"][:80])
                 continue
 
-            msg_type = data.get("type", "")
-            msg_body = data.get("msg", "")
+            instruction_type = data.get("type", "")
+            instruction_body = data.get("msg", "")
 
-            if msg_type == "instruction" and msg_body == "end_of_speech":
-                if not audio_chunks:
-                    logger.warning("end_of_speech with no audio buffered")
-                    await ws_send_json(websocket, type="error", msg="no audio received")
-                    continue
+            if instruction_type != "instruction" or instruction_body != "end_of_speech":
+                logger.debug("Ignoring unhandled message: %s", data)
+                continue
 
-                audio_bytes  = b"".join(audio_chunks)
-                audio_chunks = []
-                logger.info("end_of_speech: %d PCM bytes accumulated", len(audio_bytes))
+            # ── end_of_speech: run the pipeline ───────────────────────────────
+            if not audio_chunks:
+                logger.warning("  [ESP32→SVR] end_of_speech but no audio buffered — ignoring")
+                await ws_send_json(websocket, type="error", msg="no audio received")
+                continue
 
-                await ws_send_json(websocket, type="server", msg="RESPONSE.CREATED")
+            utterance_n  += 1
+            audio_bytes   = b"".join(audio_chunks)
+            audio_chunks  = []
+            audio_dur_s   = len(audio_bytes) / (SERVER_SAMPLE_RATE * 2)
+            utterance_start = time.monotonic()
 
-                client = app.state.http_client
-                try:
-                    transcript, reply, saved_path = await run_pipeline(
-                        audio_bytes, client, source="ws"
-                    )
-                except ValueError as ve:
-                    logger.warning("Pipeline error: %s", ve)
-                    await ws_send_json(websocket, type="error", msg=str(ve))
-                    await ws_send_json(websocket, type="server", msg="RESPONSE.COMPLETE")
-                    continue
+            logger.info(_sep(f"UTTERANCE #{utterance_n}"))
+            logger.info(
+                "  [ESP32→SVR] end_of_speech  chunks=%d  pcm=%d B  duration=%.2f s",
+                len(audio_chunks) + 1 if audio_chunks else 1,
+                len(audio_bytes), audio_dur_s,
+            )
 
-                logger.info("Audio saved: %s", saved_path)
+            logger.info("  [SVR→ESP32] sending RESPONSE.CREATED")
+            await ws_send_json(websocket, type="server", msg="RESPONSE.CREATED")
 
-                await ws_send_json(websocket, type="transcript", msg=transcript)
-                await ws_send_json(websocket, type="response",   msg=reply)
-
-                loop      = asyncio.get_event_loop()
-                pcm_bytes = await loop.run_in_executor(None, _run_silero_tts, reply)
-
-                if pcm_bytes:
-                    opus_packets = await loop.run_in_executor(
-                        None, encode_pcm_to_opus, pcm_bytes
-                    )
-                    total = len(opus_packets)
-                    logger.info(
-                        "Streaming %d Opus packets at %.0f ms/pkt pacing (%.0f%% real-time)",
-                        total,
-                        FRAME_PACING_S * 1000,
-                        FRAME_PACING_FACTOR * 100,
-                    )
-                    stream_start = time.monotonic()
-                    for idx, packet in enumerate(opus_packets):
-                        await websocket.send_bytes(packet)
-                        deadline  = stream_start + (idx + 1) * FRAME_PACING_S
-                        remaining = deadline - time.monotonic()
-                        if remaining > 0:
-                            await asyncio.sleep(remaining)
-                    logger.info("All %d Opus packets sent", total)
-                else:
-                    logger.error("TTS returned empty audio")
-
+            client = app.state.http_client
+            try:
+                transcript, reply, saved_path = await run_pipeline(
+                    audio_bytes, client, source="ws"
+                )
+            except ValueError as ve:
+                logger.warning("  pipeline error: %s — sending error + RESPONSE.COMPLETE", ve)
+                await ws_send_json(websocket, type="error", msg=str(ve))
                 await ws_send_json(websocket, type="server", msg="RESPONSE.COMPLETE")
-                logger.info("Pipeline complete for %s", client_host)
+                continue
+
+            logger.info(_sep("TTS + OPUS"))
+            logger.info("  [SVR→ESP32] sending transcript: %r", transcript[:80])
+            await ws_send_json(websocket, type="transcript", msg=transcript)
+            logger.info("  [SVR→ESP32] sending response:   %r", reply[:80])
+            await ws_send_json(websocket, type="response",   msg=reply)
+
+            loop      = asyncio.get_event_loop()
+            pcm_bytes = await loop.run_in_executor(None, _run_silero_tts, reply)
+
+            if pcm_bytes:
+                t_enc = time.monotonic()
+                opus_packets = await loop.run_in_executor(
+                    None, encode_pcm_to_opus, pcm_bytes
+                )
+                total        = len(opus_packets)
+                total_bytes  = sum(len(p) for p in opus_packets)
+                stream_dur_s = total * FRAME_PACING_S
+                logger.info(
+                    "  [SVR→ESP32] streaming %d Opus packets  "
+                    "pacing=%.0f ms/pkt (%.0f%% RT)  "
+                    "total_opus=%d B  expected_stream_time=%.2f s",
+                    total, FRAME_PACING_S * 1000, FRAME_PACING_FACTOR * 100,
+                    total_bytes, stream_dur_s,
+                )
+                stream_start = time.monotonic()
+                for idx, packet in enumerate(opus_packets):
+                    await websocket.send_bytes(packet)
+                    if idx == 0:
+                        logger.info("  [SVR→ESP32] first Opus packet sent")
+                    deadline  = stream_start + (idx + 1) * FRAME_PACING_S
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                actual_stream_s = time.monotonic() - stream_start
+                logger.info(
+                    "  [SVR→ESP32] all %d Opus packets sent  "
+                    "actual_stream_time=%.2f s  expected=%.2f s  drift=%.0f ms",
+                    total, actual_stream_s, stream_dur_s,
+                    (actual_stream_s - stream_dur_s) * 1000,
+                )
+            else:
+                logger.error("  TTS returned empty audio — nothing to stream")
+
+            logger.info("  [SVR→ESP32] sending RESPONSE.COMPLETE")
+            await ws_send_json(websocket, type="server", msg="RESPONSE.COMPLETE")
+
+            utterance_elapsed = time.monotonic() - utterance_start
+            logger.info(
+                _sep(f"UTTERANCE #{utterance_n} DONE"),
+            )
+            logger.info(
+                "  total wall time for this utterance: %.2f s  "
+                "(session uptime: %.0f s)",
+                utterance_elapsed, time.monotonic() - session_start,
+            )
 
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected: %s", client_host)
+        logger.info(
+            _sep("ESP32 DISCONNECTED"),
+        )
+        logger.info(
+            "  host=%s  utterances=%d  session_uptime=%.0f s",
+            client_host, utterance_n, time.monotonic() - session_start,
+        )
     except Exception as exc:
-        logger.error("WebSocket error for %s: %s", client_host, exc)
+        logger.error(_sep("SESSION ERROR"))
+        logger.error("  host=%s  error=%s", client_host, exc)
         try:
             await ws_send_json(websocket, type="error", msg=str(exc))
             await websocket.close()

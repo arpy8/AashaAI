@@ -6,6 +6,17 @@
  * Architecture:
  *   Core 0 — WiFi, WebSocket client, WakeNet, recording, Opus decode
  *   Core 1 — I2S playback renderer (playback_task, spawned on demand)
+ *
+ * Playback strategy (buffer-before-play):
+ *   All Opus frames are decoded into the ring buffer as they arrive.
+ *   The playback_task is only spawned after RESPONSE.COMPLETE, guaranteeing
+ *   the ENTIRE response is available before a single sample is sent to I2S.
+ *   This eliminates buffer underruns unconditionally.
+ *
+ *   If you receive very large responses and PSRAM is tight you can instead
+ *   set PLAYBACK_START_ON == PLAYBACK_START_PREFILL and tune
+ *   PLAYBACK_PREFILL_BYTES to a safe partial amount; playback_task will then
+ *   wait until that many bytes are in the ring buffer before draining.
  */
 
 #include <math.h>
@@ -67,7 +78,31 @@ static float SILENCE_THRESHOLD     = 300.0f;
 #define RESAMPLE_RATIO            1.5f
 
 // ─── Playback parameters ──────────────────────────────────────────────────────
-#define MAX_PLAYBACK_CHUNK_SAMPLES  480
+#define MAX_PLAYBACK_CHUNK_SAMPLES   480
+
+/**
+ * Playback start modes — select ONE by defining PLAYBACK_START_ON below.
+ *
+ *  PLAYBACK_START_COMPLETE
+ *      Wait for RESPONSE.COMPLETE / audio_end before draining.
+ *      Best quality: the ring buffer holds the full response, so underrun
+ *      is impossible.  Use this unless PSRAM is too small for long responses.
+ *
+ *  PLAYBACK_START_PREFILL
+ *      Start draining once PLAYBACK_PREFILL_BYTES are buffered, even if
+ *      more Opus frames are still arriving.  Lower latency but requires
+ *      careful tuning of PLAYBACK_PREFILL_BYTES to avoid underrun.
+ */
+#define PLAYBACK_START_COMPLETE  0
+#define PLAYBACK_START_PREFILL   1
+
+#define PLAYBACK_START_ON  PLAYBACK_START_COMPLETE   /* ← change here if needed */
+
+/**
+ * Only used when PLAYBACK_START_ON == PLAYBACK_START_PREFILL.
+ * ~1 second of 24 kHz mono PCM = 48 000 bytes.
+ */
+#define PLAYBACK_PREFILL_BYTES  (SERVER_SAMPLE_RATE * sizeof(int16_t) * 1)
 
 // ─── Core pinning ─────────────────────────────────────────────────────────────
 #define CORE_NETWORK   0
@@ -96,6 +131,8 @@ static esp_websocket_client_handle_t ws_client     = NULL;
 static SemaphoreHandle_t             ws_sem         = NULL;
 static bool                          ws_connected   = false;
 static bool                          audio_streaming = false;
+
+static bool wifi_is_connected = false;   /**< Set by the WiFi event handler. */
 
 static OpusDecoder *opus_decoder      = NULL;
 static int16_t     *opus_decode_buffer = NULL;
@@ -146,6 +183,7 @@ static esp_err_t send_end_of_speech(void);
 void process_query(int16_t *buffer, int audio_chunksize, int sample_count);
 void calibrate_silence_threshold(int16_t *buffer, int audio_chunksize,
                                   int sample_count);
+static void wifi_monitor_task(void *arg);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Peripheral init
@@ -165,7 +203,26 @@ void led_init(void)
     gpio_set_level(LED_PIN, 0);
 }
 
-/** @brief Initialise WiFi in station mode and block until connected. */
+// ─── WiFi event handler ───────────────────────────────────────────────────────
+
+/**
+ * @brief Track IP acquisition and disconnection so wifi_monitor_task has
+ *        an authoritative flag to poll.
+ */
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                                int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_is_connected = false;
+        ESP_LOGW(TAG, "WiFi disconnected");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "WiFi connected — IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        wifi_is_connected = true;
+    }
+}
+
+/** @brief Initialise WiFi in station mode and block until connected (or timeout). */
 void wifi_init(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -175,6 +232,12 @@ void wifi_init(void)
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    /* Register event handlers so wifi_is_connected stays accurate. */
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                               &wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               &wifi_event_handler, NULL));
 
     wifi_config_t wifi_config = {
         .sta = {
@@ -188,8 +251,96 @@ void wifi_init(void)
 
     ESP_LOGI(TAG, "Connecting to WiFi…");
     ESP_ERROR_CHECK(esp_wifi_connect());
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    ESP_LOGI(TAG, "WiFi connected");
+
+    /* Block until the IP event fires (up to 10 s). */
+    for (int i = 0; i < 20 && !wifi_is_connected; i++)
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+    if (wifi_is_connected)
+        ESP_LOGI(TAG, "WiFi ready");
+    else
+        ESP_LOGE(TAG, "WiFi initial connection timed out — monitor will retry");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// WiFi monitor task  (pinned to Core 0)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Periodically verify WiFi connectivity and reconnect when lost.
+ *
+ * Every WIFI_CHECK_INTERVAL_MS the task inspects @c wifi_is_connected.
+ * If the link is down it calls @c esp_wifi_connect() and waits up to
+ * WIFI_RECONNECT_TIMEOUT_MS for the IP event to fire before trying again.
+ * The WebSocket client is restarted once WiFi is re-established so that
+ * voice queries can resume without a full reboot.
+ */
+#define WIFI_CHECK_INTERVAL_MS    10000   /**< Poll period while connected.      */
+#define WIFI_RECONNECT_TIMEOUT_MS 15000   /**< Max wait after esp_wifi_connect(). */
+
+static void wifi_monitor_task(void *arg)
+{
+    ESP_LOGI(TAG, "WiFi monitor started (check every %d s)", WIFI_CHECK_INTERVAL_MS / 1000);
+
+    while (1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(WIFI_CHECK_INTERVAL_MS));
+
+        if (wifi_is_connected) {
+            ESP_LOGD(TAG, "WiFi OK");
+            continue;
+        }
+
+        /* ── Link is down ── */
+        ESP_LOGW(TAG, "WiFi lost — attempting reconnect…");
+
+        /* Stop the WebSocket so it doesn't queue up frames against a dead link. */
+        if (ws_client && ws_connected) {
+            ws_connected = false;
+            esp_websocket_client_stop(ws_client);
+            ESP_LOGI(TAG, "WebSocket stopped while WiFi is down");
+        }
+
+        /* Ask the WiFi driver to reconnect; it will fire IP_EVENT_STA_GOT_IP
+         * (and our handler sets wifi_is_connected = true) on success.        */
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
+            ESP_LOGE(TAG, "esp_wifi_connect returned %s", esp_err_to_name(err));
+        }
+
+        /* Wait for IP event. */
+        int waited = 0;
+        while (!wifi_is_connected && waited < WIFI_RECONNECT_TIMEOUT_MS) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            waited += 500;
+        }
+
+        if (!wifi_is_connected) {
+            ESP_LOGE(TAG, "Reconnect timed out — will retry in %d s",
+                     WIFI_CHECK_INTERVAL_MS / 1000);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "WiFi reconnected — restarting WebSocket…");
+
+        /* Brief settling delay before bringing the WebSocket back up. */
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (ws_client) {
+            if (esp_websocket_client_start(ws_client) == ESP_OK) {
+                /* Wait up to 5 s for the WebSocket handshake. */
+                for (int i = 0; i < 10 && !ws_connected; i++)
+                    vTaskDelay(pdMS_TO_TICKS(500));
+
+                if (ws_connected)
+                    ESP_LOGI(TAG, "WebSocket reconnected successfully");
+                else
+                    ESP_LOGE(TAG, "WebSocket handshake timed out after WiFi recovery");
+            } else {
+                ESP_LOGE(TAG, "esp_websocket_client_start failed after WiFi recovery");
+            }
+        }
+    }
 }
 
 /** @brief Configure I2S0 as a Philips-standard mono receiver for the INMP441. */
@@ -406,18 +557,55 @@ void stop_streaming(void)
 /**
  * @brief Drain the playback ring buffer through the I2S DMA in 20 ms chunks.
  *
- * Spawned exclusively from the RESPONSE.COMPLETE handler after all Opus frames
- * have been decoded into the ring buffer, so underruns are not possible.
+ * Behaviour depends on PLAYBACK_START_ON:
+ *
+ *   PLAYBACK_START_COMPLETE (default):
+ *     The task is spawned only after RESPONSE.COMPLETE, so the entire
+ *     decoded response is already in the ring buffer.  Draining begins
+ *     immediately without any prefill wait — underrun is structurally
+ *     impossible because no new data will ever be written while we drain.
+ *
+ *   PLAYBACK_START_PREFILL:
+ *     The task may be spawned while Opus frames are still arriving.  It
+ *     busy-waits (yielding every 5 ms) until PLAYBACK_PREFILL_BYTES bytes
+ *     are buffered, then begins draining.  The prefill acts as a jitter
+ *     absorber so the I2S DMA is never starved.
+ *
  * Signals @c ws_sem on completion to unblock process_query().
  */
 static void playback_task(void *arg)
 {
     ESP_LOGI(TAG, "Playback task started on core %d", xPortGetCoreID());
+
+#if PLAYBACK_START_ON == PLAYBACK_START_COMPLETE
+    /*
+     * The whole response is already in the ring buffer; log how much we have
+     * and start draining immediately.
+     */
+    ESP_LOGI(TAG, "Playback: full buffer ready (%u bytes) — starting drain",
+             get_buffered_audio_size());
+
+#else /* PLAYBACK_START_PREFILL */
+    /*
+     * Wait until the ring buffer holds at least PLAYBACK_PREFILL_BYTES,
+     * OR until playback_complete is set (meaning no more Opus frames will
+     * arrive even if we haven't hit the prefill target yet).
+     */
+    ESP_LOGI(TAG, "Playback: waiting for prefill (%u bytes required)…",
+             PLAYBACK_PREFILL_BYTES);
+
+    while (get_buffered_audio_size() < PLAYBACK_PREFILL_BYTES && !playback_complete)
+        vTaskDelay(pdMS_TO_TICKS(5));
+
+    ESP_LOGI(TAG, "Playback: prefill reached (%u bytes buffered) — starting drain",
+             get_buffered_audio_size());
+#endif
+
     gpio_set_level(LED_PIN, 1);
 
     while (get_buffered_audio_size() > 0)
     {
-        size_t available      = get_buffered_audio_size();
+        size_t available       = get_buffered_audio_size();
         size_t samples_to_play = available / sizeof(int16_t);
 
         if (samples_to_play == 0)
@@ -495,7 +683,27 @@ static void playback_task(void *arg)
         }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    /*
+     * Flush the I2S DMA FIFO with silence so the amplifier receives clean
+     * zeros rather than repeating the last real samples.
+     *
+     * The ESP32-S3 I2S DMA has an internal pipeline of several descriptor
+     * buffers.  Simply stopping writes leaves whatever was last clocked out
+     * sitting in the FIFO, which the MAX98357A happily amplifies as noise.
+     * Writing three full chunks of zeros (3 x 20 ms = 60 ms) guarantees
+     * every DMA descriptor has been replaced with silence before we exit.
+     */
+    memset(streaming_stereo_buffer, 0,
+           MAX_PLAYBACK_CHUNK_SAMPLES * 2 * sizeof(int16_t));
+
+    for (int flush = 0; flush < 3; flush++) {
+        size_t flushed = 0;
+        i2s_channel_write(tx_handle,
+                          streaming_stereo_buffer,
+                          MAX_PLAYBACK_CHUNK_SAMPLES * 2 * sizeof(int16_t),
+                          &flushed,
+                          pdMS_TO_TICKS(200));
+    }
 
     gpio_set_level(LED_PIN, 0);
     ESP_LOGI(TAG, "Playback complete");
@@ -515,6 +723,10 @@ static void playback_task(void *arg)
  *
  * Text frames carry JSON control messages; binary frames carry Opus-encoded
  * audio packets that are decoded directly into the playback ring buffer.
+ *
+ * Playback task is only spawned on RESPONSE.COMPLETE / audio_end.
+ * By that point every Opus frame has already been decoded into the ring
+ * buffer, so the task can drain it without any risk of underrun.
  */
 static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                     int32_t event_id, void *event_data)
@@ -562,14 +774,15 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                         {
                             audio_streaming = true;
                             reset_playback_buffer();
-                            ESP_LOGI(TAG, "RESPONSE.CREATED — buffering audio");
+                            ESP_LOGI(TAG, "RESPONSE.CREATED — buffering all audio "
+                                         "before playback");
                         }
                         else if (strcmp(msg->valuestring, "RESPONSE.COMPLETE") == 0)
                         {
                             audio_streaming   = false;
                             playback_complete = true;
-                            ESP_LOGI(TAG, "RESPONSE.COMPLETE — launching playback "
-                                     "(%u bytes buffered)",
+                            ESP_LOGI(TAG, "RESPONSE.COMPLETE — full buffer ready "
+                                         "(%u bytes), launching playback",
                                      get_buffered_audio_size());
 
                             if (!playback_started)
@@ -590,13 +803,16 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                     {
                         audio_streaming = true;
                         reset_playback_buffer();
-                        ESP_LOGI(TAG, "audio_start — buffering");
+                        ESP_LOGI(TAG, "audio_start — buffering all audio before "
+                                      "playback");
                     }
                     else if (strcmp(type->valuestring, "audio_end") == 0)
                     {
                         audio_streaming   = false;
                         playback_complete = true;
-                        ESP_LOGI(TAG, "audio_end — launching playback");
+                        ESP_LOGI(TAG, "audio_end — full buffer ready (%u bytes), "
+                                      "launching playback",
+                                 get_buffered_audio_size());
 
                         if (!playback_started)
                         {
@@ -1036,8 +1252,12 @@ static void wake_word_task(void *arg)
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * @brief One-time hardware/software init; launches wake_word_task on Core 0
- *        then deletes itself.
+ * @brief One-time hardware/software init; launches tasks on Core 0 then
+ *        deletes itself.
+ *
+ * Tasks spawned:
+ *   wake_word_task   — WakeNet detection + VAD + query pipeline  (Core 0)
+ *   wifi_monitor_task — periodic WiFi watchdog + auto-reconnect   (Core 0)
  */
 void app_main(void)
 {
@@ -1054,6 +1274,15 @@ void app_main(void)
         8192,
         NULL,
         4,
+        NULL,
+        CORE_NETWORK);
+
+    xTaskCreatePinnedToCore(
+        wifi_monitor_task,
+        "wifi_monitor",
+        4096,
+        NULL,
+        2,               /* lower priority than wake_word_task */
         NULL,
         CORE_NETWORK);
 
